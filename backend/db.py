@@ -121,6 +121,8 @@ def init_db():
             db.execute('ALTER TABLE events ADD COLUMN cost_auto INTEGER NOT NULL DEFAULT 0')
         if 'sort_order' not in {row['name'] for row in db.execute('PRAGMA table_info(attachments)')}:
             db.execute('ALTER TABLE attachments ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0')
+        if 'version' not in {row['name'] for row in db.execute('PRAGMA table_info(elevators)')}:
+            db.execute('ALTER TABLE elevators ADD COLUMN version INTEGER NOT NULL DEFAULT 1')
 
 
 def get_one(db, sql, args=()):

@@ -48,7 +48,8 @@ class AcceptanceAudit(unittest.TestCase):
         lift = self.post('/api/elevators',data)['id']
         self.assertEqual(self.client.get(f'/api/elevators/{lift}').json()['building_name'],'20栋')
         self.assertEqual(self.client.post('/api/elevators',json=data).status_code,409)
-        self.assertEqual(self.client.put(f'/api/elevators/{lift}',json={**data,'building_name':'21栋'}).status_code,200)
+        current = self.client.get(f'/api/elevators/{lift}').json()
+        self.assertEqual(self.client.put(f'/api/elevators/{lift}',json={**current,'building_name':'21栋'}).status_code,200)
         self.assertEqual(self.client.get(f'/api/elevators/{lift}').json()['building_name'],'21栋')
         self.assertEqual(self.client.post('/api/elevators',json={**data,'building_name':'','unit_name':'未建单元'}).status_code,400)
 

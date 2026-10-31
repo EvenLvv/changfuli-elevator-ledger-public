@@ -230,6 +230,10 @@ def create_user(data: dict = Body(...), user=Depends(admin)):
 @app.put("/api/users/{user_id}")
 def edit_user(user_id: int, data: dict = Body(...), user=Depends(admin)):
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        # The actor may have been disabled/demoted while waiting for the write lock.
+        if not get_one(db, "SELECT id FROM users WHERE id=? AND role='admin' AND active=1", (user["id"],)):
+            error("管理员权限已变化，请重新登录", 403)
         before = get_one(db, "SELECT id,username,display_name,role,active FROM users WHERE id=?", (user_id,))
         if not before:
             error("找不到用户", 404)
@@ -297,6 +301,7 @@ def edit_building(building_id: int, data: dict = Body(...), user=Depends(admin))
 @app.delete("/api/buildings/{building_id}")
 def delete_building(building_id: int, user=Depends(admin)):
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
         before = must_exist(db, "buildings", building_id)
         if not before:
             error("找不到楼栋", 404)
@@ -325,6 +330,7 @@ def units(building_id: Optional[int] = None, user=Depends(actor)):
 def add_unit(data: dict = Body(...), user=Depends(admin)):
     name = require_text(data.get("name"), "单元名称", 40)
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
         if not must_exist(db, "buildings", positive_int(data.get("building_id"), "楼栋", 1)):
             error("请选择已有楼栋")
         try:
@@ -353,6 +359,7 @@ def edit_unit(unit_id: int, data: dict = Body(...), user=Depends(admin)):
 @app.delete("/api/units/{unit_id}")
 def delete_unit(unit_id: int, user=Depends(admin)):
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
         before = must_exist(db, "units", unit_id)
         if not before:
             error("找不到单元", 404)
@@ -514,6 +521,9 @@ def edit_elevator(elevator_id: int, data: dict = Body(...), user=Depends(admin))
         before = must_exist(db, "elevators", elevator_id)
         if not before:
             error("找不到这部电梯", 404)
+        if type(data.get("version")) is not int or data["version"] != before["version"]:
+            error("电梯档案或状态已变化，请刷新页面后重新编辑", 409)
+        values["version"] = before["version"] + 1
         if 'building_name' in data or 'unit_name' in data:
             values['unit_id'] = resolve_unit(db, data, user)
         try:
@@ -640,7 +650,7 @@ def update_record_status(db, data, elevator_id, user, event_id):
     if not isinstance(status, str) or status not in STATUSES:
         error("电梯状态不正确")
     before = must_exist(db, "elevators", elevator_id)
-    db.execute("UPDATE elevators SET status=? WHERE id=?", (status, elevator_id))
+    db.execute("UPDATE elevators SET status=?,version=version+1 WHERE id=?", (status, elevator_id))
     audit(db, user["id"], "修改", "电梯状态", elevator_id, before={"status": before["status"]},
           after={"status": status, "event_id": event_id})
 
@@ -762,6 +772,18 @@ def validate_file(raw, ext):
         error("Office文件无效")
 
 
+def checked_upload_target(relative):
+    root = STORAGE.resolve()
+    path = STORAGE / relative
+    try:
+        parent, target = path.parent.resolve(), path.resolve()
+    except (OSError, RuntimeError):
+        error("附件存储路径无效，请联系管理员", 400)
+    if not parent.is_relative_to(root) or not target.is_relative_to(root):
+        error("附件存储路径超出存储目录，请联系管理员", 400)
+    return target
+
+
 @app.post("/api/events/{event_id}/attachments")
 async def upload(event_id: int, file: UploadFile = File(...), category: str = Form("其他"), user=Depends(actor)):
     if category not in CATEGORIES:
@@ -778,16 +800,21 @@ async def upload(event_id: int, file: UploadFile = File(...), category: str = Fo
     validate_file(raw, ext)
     file_id = uuid.uuid4().hex
     relative = Path("photos" if ext in {".jpg", ".jpeg", ".png", ".webp"} else "attachments") / f"{file_id}{ext}"
-    target = STORAGE / relative
+    target = checked_upload_target(relative)
     target.parent.mkdir(parents=True, exist_ok=True)
+    target = checked_upload_target(relative)
     with connect() as db:
         event = event_full(db, event_id)
         if not event:
             error("找不到这条工作记录", 404)
         if user["role"] != "admin" and event["created_by"] != user["id"]:
             error("只能为自己创建的记录上传附件", 403)
-        target.write_bytes(raw)
+        target = checked_upload_target(relative)
+        # Exclusive creation also prevents following an existing file symlink.
+        with target.open("xb") as output:
+            output.write(raw)
         try:
+            checked_upload_target(relative)
             order = db.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM attachments WHERE event_id=?", (event_id,)).fetchone()[0]
             db.execute("""INSERT INTO attachments(id,event_id,elevator_id,original_name,relative_path,category,mime_type,size,uploaded_by,created_at,sort_order)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (file_id, event_id, event["elevator_id"], original, relative.as_posix(), category,
