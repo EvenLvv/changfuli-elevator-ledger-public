@@ -12,12 +12,6 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      ELEVATOR_DATA_DIR: ${{ runner.temp }}/elevator-ci/data
-      ELEVATOR_STORAGE_DIR: ${{ runner.temp }}/elevator-ci/storage
-      ELEVATOR_EXPORT_DIR: ${{ runner.temp }}/elevator-ci/exports
-      ELEVATOR_BACKUP_DIR: ${{ runner.temp }}/elevator-ci/backups
-      ELEVATOR_LOG_DIR: ${{ runner.temp }}/elevator-ci/logs
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -37,4 +31,10 @@ jobs:
         run: npm run typecheck && npm run build
         working-directory: frontend
       - name: Test backend and installer helpers
+        env:
+          ELEVATOR_DATA_DIR: ${{ runner.temp }}/elevator-ci/data
+          ELEVATOR_STORAGE_DIR: ${{ runner.temp }}/elevator-ci/storage
+          ELEVATOR_EXPORT_DIR: ${{ runner.temp }}/elevator-ci/exports
+          ELEVATOR_BACKUP_DIR: ${{ runner.temp }}/elevator-ci/backups
+          ELEVATOR_LOG_DIR: ${{ runner.temp }}/elevator-ci/logs
         run: python -m unittest discover -s tests -v
