@@ -1,0 +1,62 @@
+# Local environments and generated frontend files
+.venv/
+venv/
+node_modules/
+/frontend/dist/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.DS_Store
+
+# Runtime data, accounts, attachments and logs; keep only empty placeholders
+/data/*
+!/data/.gitkeep
+/storage/*
+!/storage/.gitkeep
+!/storage/photos/
+!/storage/attachments/
+/storage/photos/*
+!/storage/photos/.gitkeep
+/storage/attachments/*
+!/storage/attachments/.gitkeep
+/exports/*
+!/exports/.gitkeep
+/backups/*
+!/backups/.gitkeep
+/logs/*
+!/logs/.gitkeep
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+
+# Build inputs and deliverables are regenerated or distributed separately
+/outputs/
+/wheelhouse/
+*.zip
+*.zip.sha256
+*.exe
+*.exe.sha256
+*.whl
+*.partial
+
+# Retain written QA notes, not generated screenshots, samples or recordings
+/docs/qa/**
+!/docs/qa/**/
+!/docs/qa/**/*.md
+
+# Local credentials and tool state
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+/.codex/
+/.agents/
+/.aws/
+
+# Legacy third-party visual reference is excluded from public source
+/frontend/src/assets/architecture.jpg
