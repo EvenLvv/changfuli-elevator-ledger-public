@@ -4,9 +4,13 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const base=process.env.AUDIT_URL||'http://127.0.0.1:8766';
 const out=process.env.AUDIT_OUTPUT||'/private/tmp/elevator-style-qa';
+const endpoint=new URL(base);
+assert.ok(['127.0.0.1','[::1]','localhost'].includes(endpoint.hostname)&&endpoint.port!=='8765',
+ 'Browser regression requires a loopback URL on a non-production port');
 (async()=>{
  fs.mkdirSync(out,{recursive:true});
  const api=await request.newContext({baseURL:base});
+ assert.equal((await api.get('/api/health')).status(),200,'Isolated loopback server must be healthy');
  const credentials={username:'audit',password:'audit-password-123'};
  assert.equal((await api.post('/api/login',{data:credentials})).status(),200);
  const day=new Date().toISOString().slice(0,10);
@@ -23,9 +27,9 @@ const out=process.env.AUDIT_OUTPUT||'/private/tmp/elevator-style-qa';
    await post('/api/events',{elevator_id:lift.id,type,title:['更换门锁开关，完成试运行','完成半月维保与运行检查','厅门异常，现场检查处理中','更换控制板并登记质保','完成电梯运行检查','补充检验资料','机房现场情况登记'][i],occurred_on:shift(-i),work_content:'检查厅门、门锁与控制系统，完成现场核验并登记。',workers:'张师傅',company:'宜方达合作维保单位',completed:type!=='故障',parts:type==='配件更换'?[{name:'控制板',quantity:1,unit_price_yuan:'300',replaced_on:shift(-365),warranty_days:370}]:[]});
   }
  }
- const info=await (await api.get('/api/network')).json();let lan='';
- for(const candidate of info.candidates){try{const check=await api.get(candidate+'/api/health',{timeout:3000});if(check.ok()){lan=candidate;break}}catch{}}
- assert.ok(lan,'Need a reachable LAN interface for deep-link testing');
+ // Synthetic setting: validate persistence and QR contents without contacting a LAN interface.
+ // Real LAN reachability and phone scanning require on-site acceptance.
+ const lan='http://192.168.1.20:8766';
  const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});
  try{
   const context=await browser.newContext({viewport:{width:1500,height:1060},storageState:await api.storageState()});
@@ -49,11 +53,11 @@ const out=process.env.AUDIT_OUTPUT||'/private/tmp/elevator-style-qa';
   await page.evaluate(()=>{window.print=()=>{window.__printed=true}});await page.getByRole('button',{name:'打印电梯标签',exact:true}).click();await page.waitForFunction(()=>window.__printed===true);await page.emulateMedia({media:'print'});assert.equal(await page.locator('.qr-print-sheet').isVisible(),true);assert.equal(await page.locator('.shell').isVisible(),false);await page.locator('.qr-print-sheet').screenshot({path:out+'/qr-label.png'});await page.pdf({path:out+'/qr-label.pdf',format:'A4',printBackground:true});await page.emulateMedia({media:'screen'});
   await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await page.screenshot({path:out+'/qr-mobile.png',fullPage:true});
   const scanned=await browser.newContext({viewport:{width:390,height:844}});const scan=await scanned.newPage();scan.on('pageerror',e=>errors.push(e.message));
-  await scan.goto(lan+'/elevators/'+lift.id);await scan.getByText('登录后将直接打开扫码对应的电梯档案。').waitFor();await scan.screenshot({path:out+'/scan-login-mobile.png',fullPage:true});
-  await scan.getByLabel('账号',{exact:true}).fill(credentials.username);await scan.getByLabel('密码',{exact:true}).fill(credentials.password);await scan.getByRole('button',{name:'登录',exact:true}).click();await scan.getByRole('heading',{name:'18栋1单元1号梯',exact:true}).waitFor();assert.equal(scan.url(),lan+'/elevators/'+lift.id);await scan.locator('.timeline-item').first().waitFor();await scan.screenshot({path:out+'/scan-detail-mobile.png',fullPage:true});
+  await scan.goto(base+'/elevators/'+lift.id);await scan.getByText('登录后将直接打开扫码对应的电梯档案。').waitFor();await scan.screenshot({path:out+'/scan-login-mobile.png',fullPage:true});
+  await scan.getByLabel('账号',{exact:true}).fill(credentials.username);await scan.getByLabel('密码',{exact:true}).fill(credentials.password);await scan.getByRole('button',{name:'登录',exact:true}).click();await scan.getByRole('heading',{name:'18栋1单元1号梯',exact:true}).waitFor();assert.equal(scan.url(),base+'/elevators/'+lift.id);await scan.locator('.timeline-item').first().waitFor();await scan.screenshot({path:out+'/scan-detail-mobile.png',fullPage:true});
   await scan.reload();await scan.getByRole('heading',{name:'18栋1单元1号梯',exact:true}).waitFor();
-  await scan.goto(lan+'/elevators/999999');await scan.getByText('找不到这部电梯',{exact:false}).first().waitFor();assert.equal(await scan.locator('.detail-heading').count(),0);
+  await scan.goto(base+'/elevators/999999');await scan.getByText('找不到这部电梯',{exact:false}).first().waitFor();assert.equal(await scan.locator('.detail-heading').count(),0);
   const signedOut=await browser.newContext({viewport:{width:1500,height:1060}});const login=await signedOut.newPage();await login.goto(base);await login.getByRole('button',{name:'登录',exact:true}).waitFor();await login.screenshot({path:out+'/login-desktop.png',fullPage:true});
-  assert.deepEqual(errors,[]);console.log('PASS: 10 desktop pages, 390/320px overflow checks, mobile menu/dialog, persisted LAN setting, reject loopback, QR download and print-only label, fresh LAN-origin login preserves elevator and reload, missing elevator, login design. LAN '+lan+'; Chrome '+browser.version());
+  assert.deepEqual(errors,[]);console.log('PASS: 10 desktop pages, 390/320px overflow checks, mobile menu/dialog, persisted LAN setting, reject loopback, QR download and print-only label, fresh loopback login preserves elevator and reload, missing elevator, login design. LAN reachability not tested; loopback '+base+'; Chrome '+browser.version());
  }finally{await browser.close();await api.dispose()}
 })().catch(e=>{console.error(e);process.exit(1)});
