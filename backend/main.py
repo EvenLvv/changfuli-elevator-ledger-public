@@ -27,6 +27,7 @@ from .exporter import get_data, make_export
 from .drafts import draft_detail, draft_metadata, initial_blocks, make_draft_export, source_attachments, source_status
 from .backup import create_backup
 from .archive_excel import workbook_bytes, read_records
+from .location import active_elevator_labels, add_elevator_labels, archive_number
 from .network import addresses, validate_base
 
 init_db()
@@ -275,6 +276,9 @@ def buildings(user=Depends(actor)):
 def add_building(data: dict = Body(...), user=Depends(admin)):
     name = require_text(data.get("name"), "楼栋名称", 40)
     with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        if find_archive_name(db, 'buildings', name, digits_only=True) is not None:
+            error('楼栋名称或编号已存在（含已删除资料，可在系统管理中恢复）', 409)
         try:
             cursor = db.execute("INSERT INTO buildings(name) VALUES(?)", (name,))
         except sqlite3.IntegrityError:
@@ -287,9 +291,12 @@ def add_building(data: dict = Body(...), user=Depends(admin)):
 def edit_building(building_id: int, data: dict = Body(...), user=Depends(admin)):
     name = require_text(data.get("name"), "楼栋名称", 40)
     with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
         before = must_exist(db, "buildings", building_id)
         if not before:
             error("找不到楼栋", 404)
+        if name != before['name'] and find_archive_name(db, 'buildings', name, digits_only=True, exclude_id=building_id) is not None:
+            error('楼栋名称或编号已存在', 409)
         try:
             db.execute("UPDATE buildings SET name=? WHERE id=?", (name, building_id))
         except sqlite3.IntegrityError:
@@ -331,10 +338,13 @@ def add_unit(data: dict = Body(...), user=Depends(admin)):
     name = require_text(data.get("name"), "单元名称", 40)
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        if not must_exist(db, "buildings", positive_int(data.get("building_id"), "楼栋", 1)):
+        building_id = positive_int(data.get('building_id'), '楼栋', 1)
+        if not must_exist(db, 'buildings', building_id):
             error("请选择已有楼栋")
+        if find_archive_name(db, 'units', name, building_id, digits_only=True) is not None:
+            error('该楼栋已有同号或同名单元（含已删除资料，可在系统管理中恢复）', 409)
         try:
-            cursor = db.execute("INSERT INTO units(building_id,name) VALUES(?,?)", (data["building_id"], name))
+            cursor = db.execute("INSERT INTO units(building_id,name) VALUES(?,?)", (building_id, name))
         except sqlite3.IntegrityError:
             error("该楼栋已有同名单元（含已删除资料，可在系统管理中恢复）", 409)
         audit(db, user["id"], "新增", "单元", cursor.lastrowid, after={"name": name})
@@ -345,9 +355,12 @@ def add_unit(data: dict = Body(...), user=Depends(admin)):
 def edit_unit(unit_id: int, data: dict = Body(...), user=Depends(admin)):
     name = require_text(data.get("name"), "单元名称", 40)
     with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
         before = must_exist(db, "units", unit_id)
         if not before:
             error("找不到单元", 404)
+        if name != before['name'] and find_archive_name(db, 'units', name, before['building_id'], digits_only=True, exclude_id=unit_id) is not None:
+            error('该楼栋已有同号或同名单元（含已删除资料，可在系统管理中恢复）', 409)
         try:
             db.execute("UPDATE units SET name=? WHERE id=?", (name, unit_id))
         except sqlite3.IntegrityError:
@@ -385,7 +398,27 @@ def elevator_values(data):
     return values
 
 
-def resolve_unit(db, data, user):
+def find_archive_name(db, table, name, parent=None, *, digits_only=False, exclude_id=None):
+    scope = {'buildings': '', 'units': ' WHERE building_id=?', 'elevators': ' WHERE unit_id=?'}[table]
+    sql = f'SELECT id,name,deleted_at FROM {table}' + scope
+    args = (parent,) if scope else ()
+    number = archive_number(table, name)
+    if not digits_only or number is None:
+        name_clause = ' AND name=?' if scope else ' WHERE name=?'
+        exact = db.execute(sql + name_clause, (*args, name)).fetchone()
+        if exact is not None and exact['id'] != exclude_id:
+            return exact
+    if number is None:
+        return None
+    matches = [item for item in db.execute(sql, args)
+               if item['id'] != exclude_id and archive_number(table, item['name']) == number]
+    if len(matches) > 1:
+        names = '、'.join(item['name'] for item in matches)
+        error(f'{name}对应多条旧档案（{names}），请先核对楼栋、单元或电梯名称', 409)
+    return next(iter(matches), None)
+
+
+def resolve_unit(db, data, user, *, digits_only=False, workbook_names=None, current_building_id=None):
     if 'building_name' not in data and 'unit_name' not in data:
         unit_id = positive_int(data.get('unit_id'), '单元', 1)
         unit = must_exist(db, 'units', unit_id)
@@ -395,26 +428,39 @@ def resolve_unit(db, data, user):
     building = require_text(data.get('building_name'), '楼栋', 40)
     unit = require_text(data.get('unit_name'), '单元', 40)
     for table, name, parent in [('buildings', building, None), ('units', unit, 'building_id')]:
-        condition = 'name=?' + (' AND building_id=?' if parent else '')
-        args = (name, building_id) if parent else (name,)
-        existing = get_one(db, f'SELECT * FROM {table} WHERE {condition}', args)
+        label = '单元' if parent else '楼栋'
+        if not parent and current_building_id is not None:
+            existing = get_one(db, 'SELECT id,name,deleted_at FROM buildings WHERE id=?', (current_building_id,))
+            if existing is None:
+                error('找不到当前楼栋，请刷新页面后重新编辑', 409)
+        else:
+            existing = find_archive_name(db, table, name, building_id if parent else None, digits_only=digits_only)
         if existing:
-            if existing['deleted_at']:
-                error(f'{name}已删除，请先在系统管理中恢复', 409)
+            if existing['deleted_at'] is not None:
+                error(f"{existing['name']}已删除，请先在系统管理中恢复", 409)
             item_id = existing['id']
         else:
             statement = 'INSERT INTO units(name,building_id) VALUES(?,?)' if parent else 'INSERT INTO buildings(name) VALUES(?)'
+            args = (name, building_id) if parent else (name,)
             item_id = db.execute(statement, args).lastrowid
-            audit(db, user['id'], '新增', '单元' if parent else '楼栋', item_id, after={'name':name})
+            audit(db, user['id'], '新增', label, item_id, after={'name':name})
+        if workbook_names is not None:
+            # IDs allocated by this batch can differ between preview and confirmation.
+            first_name, _ = workbook_names.setdefault((table, item_id), (name, item_id if existing else None))
+            if name != first_name:
+                error(f'表格中{label}“{first_name}”和“{name}”匹配到同一{label}，请核对原始位置名称', 409)
         if not parent:
             building_id = item_id
     return item_id
 
 
-def insert_elevator(db, data, user):
+def insert_elevator(db, data, user, *, unit_id=None, digits_only=False):
     name = require_text(data.get('name'), '电梯名称', 50)
     values = elevator_values(data)
-    unit_id = resolve_unit(db, data, user)
+    if unit_id is None:
+        unit_id = resolve_unit(db, data, user, digits_only=digits_only)
+    if find_archive_name(db, 'elevators', name, unit_id, digits_only=digits_only) is not None:
+        error('该单元已有同号或同名电梯（含已删除资料，可在系统管理中恢复）', 409)
     payload = {'unit_id':unit_id, 'name':name, **values}
     try:
         cursor = db.execute(f"INSERT INTO elevators({','.join(payload)}) VALUES({','.join('?' for _ in payload)})", list(payload.values()))
@@ -434,9 +480,11 @@ def export_archives(template: bool = False, building_id: Optional[int] = None, u
 
 
 @app.post('/api/elevator-archives/import')
-async def import_archives(file: UploadFile = File(...), dry_run: bool = True, user=Depends(admin)):
+async def import_archives(request: Request, file: UploadFile = File(...), dry_run: bool = True, user=Depends(admin)):
     if Path(file.filename or '').suffix.lower() != '.xlsx':
         error('请选择.xlsx格式的电梯档案模板')
+    # FastAPI's Form parameter normalizes an explicitly empty field to its default.
+    preview_token = (await request.form()).get('preview_token')
     raw = await file.read(5 * 1024 * 1024 + 1)
     await file.close()
     if not raw or len(raw) > 5 * 1024 * 1024:
@@ -446,32 +494,49 @@ async def import_archives(file: UploadFile = File(...), dry_run: bool = True, us
     except Exception as exc:
         error(str(exc) if isinstance(exc, ValueError) else '无法读取表格，请使用下载的.xlsx模板')
     errors, preview, seen = [], [], set()
+    workbook_names = {}
+    plan = []
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
         for number, data in records:
             try:
                 name = require_text(data.get('name'), '电梯名称', 50)
                 elevator_values(data)
-                key = (require_text(data.get('building_name'), '楼栋', 40), require_text(data.get('unit_name'), '单元', 40), name)
+                unit_id = resolve_unit(db, data, user, workbook_names=workbook_names)
+                existing = find_archive_name(db, 'elevators', name, unit_id)
+                key = (unit_id, existing['name'] if existing else name)
                 if key in seen:
                     error('表格内重复出现同一部电梯')
                 seen.add(key)
-                unit_id = resolve_unit(db, data, user)
-                existing = get_one(db, 'SELECT id,deleted_at FROM elevators WHERE unit_id=? AND name=?', (unit_id,name))
                 if existing and existing['deleted_at']:
                     error('该电梯已删除，请先在系统管理中恢复')
                 action = '跳过' if existing else '新增'
-                if not existing:
-                    insert_elevator(db, {**data, 'unit_id':unit_id}, user)
-                preview.append({'row':number,'place':' / '.join(key),'action':action})
+                elevator_id = existing['id'] if existing else insert_elevator(db, data, user, unit_id=unit_id)
+                target = db.execute('''SELECT b.id building_id,b.name building_name,u.name unit_name,e.name FROM elevators e
+                    JOIN units u ON u.id=e.unit_id JOIN buildings b ON b.id=u.building_id WHERE e.id=?''', (elevator_id,)).fetchone()
+                actual = (target['building_name'], target['unit_name'], target['name'])
+                source = (data['building_name'], data['unit_name'], name)
+                place = ' / '.join(source)
+                if source != actual:
+                    place = f"表格：{place} → 实际：{' / '.join(actual)}"
+                preview.append({'row':number,'place':place,'action':action})
+                plan.append((number, action, actual, workbook_names[('buildings', target['building_id'])][1],
+                             workbook_names[('units', unit_id)][1], existing['id'] if existing else None))
             except HTTPException as exc:
                 errors.append(f'第{number}行：{exc.detail}')
-        if errors or dry_run:
-            db.rollback()
         if errors:
+            db.rollback()
             return {'valid':False, 'errors':errors[:20], 'error_count':len(errors), 'rows':[], 'added':0, 'skipped':0}
+        digest = hashlib.sha256(raw)
+        digest.update(json.dumps(plan).encode('utf-8'))
+        token = digest.hexdigest()
+        if dry_run:
+            db.rollback()
+        elif preview_token is not None and preview_token != token:
+            error('预览后的实际位置或导入结果已变化，请重新检查表格', 409)
     return {'valid':True, 'errors':[], 'rows':preview, 'added':sum(r['action']=='新增' for r in preview),
-            'skipped':sum(r['action']=='跳过' for r in preview), 'committed':not dry_run}
+            'skipped':sum(r['action']=='跳过' for r in preview), 'committed':not dry_run,
+            'preview_token': token if dry_run else None}
 
 
 @app.get("/api/elevators")
@@ -491,11 +556,30 @@ def elevators(building_id: Optional[int] = None, unit_id: Optional[int] = None, 
         return items
 
 
+def normalize_numbered_elevator(data):
+    digits_only = any(key in data for key in ('building_number', 'unit_number', 'elevator_number'))
+    if digits_only:
+        for key, field, label, suffix in (
+            ('building_number', 'building_name', '楼栋', '栋'),
+            ('unit_number', 'unit_name', '单元口', '口'),
+        ):
+            number = require_text(data.get(key), label, 39)
+            if not re.fullmatch(r'[0-9]+', number) or not number.strip('0'):
+                error(f'{label}请输入大于 0 的整数')
+            data[field] = number.lstrip('0') + suffix
+        number = data.get('elevator_number')
+        if number not in ('1', '2'):
+            error('请选择 1 号或 2 号电梯')
+        data['name'] = number + '号电梯'
+    return digits_only
+
+
 @app.post("/api/elevators")
 def add_elevator(data: dict = Body(...), user=Depends(admin)):
+    digits_only = normalize_numbered_elevator(data)
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
-        elevator_id = insert_elevator(db, data, user)
+        elevator_id = insert_elevator(db, data, user, digits_only=digits_only)
     return {"id": elevator_id}
 
 
@@ -514,18 +598,37 @@ def elevator(elevator_id: int, user=Depends(actor)):
 
 @app.put("/api/elevators/{elevator_id}")
 def edit_elevator(elevator_id: int, data: dict = Body(...), user=Depends(admin)):
+    digits_only = normalize_numbered_elevator(data)
     values = elevator_values(data)
     values["name"] = require_text(data.get("name"), "电梯名称", 50)
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
-        before = must_exist(db, "elevators", elevator_id)
+        before = must_exist(db, 'elevators', elevator_id)
         if not before:
             error("找不到这部电梯", 404)
         if type(data.get("version")) is not int or data["version"] != before["version"]:
             error("电梯档案或状态已变化，请刷新页面后重新编辑", 409)
         values["version"] = before["version"] + 1
-        if 'building_name' in data or 'unit_name' in data:
-            values['unit_id'] = resolve_unit(db, data, user)
+        keep_unit = False
+        current_building_id = None
+        if digits_only:
+            location = get_one(db, """SELECT u.name unit_name,b.name building_name,b.id building_id,
+                CASE WHEN b.deleted_at IS NOT NULL THEN b.name WHEN u.deleted_at IS NOT NULL THEN u.name END deleted_name
+                FROM units u JOIN buildings b ON b.id=u.building_id WHERE u.id=?""", (before['unit_id'],))
+            if location and archive_number('buildings', location['building_name']) == archive_number('buildings', data['building_name']):
+                current_building_id = location['building_id']
+                keep_unit = archive_number('units', location['unit_name']) == archive_number('units', data['unit_name'])
+                if keep_unit and location['deleted_name'] is not None:
+                    error(f"{location['deleted_name']}已删除，请先在系统管理中恢复", 409)
+            if archive_number('elevators', before['name']) == data['elevator_number']:
+                values['name'] = before['name']
+        if not keep_unit and ('building_name' in data or 'unit_name' in data):
+            values['unit_id'] = resolve_unit(db, data, user, digits_only=digits_only, current_building_id=current_building_id)
+        unit_id = values.get('unit_id', before['unit_id'])
+        if unit_id != before['unit_id'] or values['name'] != before['name']:
+            existing = find_archive_name(db, 'elevators', values['name'], unit_id, digits_only=digits_only)
+            if existing is not None and existing['id'] != elevator_id:
+                error('该单元已有同号或同名电梯（含已删除资料，可在系统管理中恢复）', 409)
         try:
             db.execute(f"UPDATE elevators SET {','.join(f'{k}=?' for k in values)} WHERE id=?", (*values.values(), elevator_id))
         except sqlite3.IntegrityError:
@@ -880,27 +983,58 @@ def delete_attachment(file_id: str, user=Depends(actor)):
 
 @app.get("/api/search")
 def search(q: str = "", user=Depends(actor)):
-    if len(q) > 200 or len(q.split()) > 10:
+    q = q.strip()
+    archive_id = len(q) <= 400 and re.match(r'档案\s*([0-9]{1,19})(?=$|\s|·)(\s*·\s*)?', q)
+    copied_label = len(q) <= 400 and re.search(r'（档案 [0-9]{1,19} · .+）\Z', q, re.DOTALL)
+    terms = q.split()
+    if not (archive_id or copied_label) and (len(q) > 200 or len(terms) > 10):
         error("搜索内容请控制在200字、10个关键词以内")
-    terms = q.strip().split()
-    if not terms:
+    if not q:
         return {"elevators": [], "events": [], "truncated": False}
-    base = """FROM elevators e JOIN units u ON u.id=e.unit_id JOIN buildings b ON b.id=u.building_id
+    base = """FROM search_locations s JOIN elevators e ON e.id=s.elevator_id
+        JOIN units u ON u.id=e.unit_id JOIN buildings b ON b.id=u.building_id
         LEFT JOIN events v ON v.elevator_id=e.id AND v.deleted_at IS NULL
         WHERE e.deleted_at IS NULL AND u.deleted_at IS NULL AND b.deleted_at IS NULL"""
-    fields = ("b.name", "u.name", "e.name", "e.internal_number", "e.equipment_number", "e.maintenance_company",
-              "v.title", "v.work_content", "v.symptom", "v.resolution", "v.occurred_on", "v.company",
-              "v.cause", "v.remedy", "v.notes", "v.workers")
+    record_fields = ("v.title", "v.work_content", "v.symptom", "v.resolution", "v.occurred_on", "v.company",
+                     "v.cause", "v.remedy", "v.notes", "v.workers")
+    fields = ("b.name", "u.name", "e.name", "s.label", "e.internal_number", "e.equipment_number", "e.maintenance_company") + record_fields
     args = []
-    for term in terms:
-        like = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-        base += " AND (" + " OR ".join(field + " LIKE ? ESCAPE '\\'" for field in fields)
-        base += " OR EXISTS (SELECT 1 FROM event_parts p WHERE p.event_id=v.id AND p.name LIKE ? ESCAPE '\\'))"
-        args.extend([like] * (len(fields) + 1))
     with connect() as db:
+        db.execute('BEGIN')
+        canonical, labels = active_elevator_labels(db)
+        if archive_id:
+            base += ' AND e.id=?'
+            args.append(archive_id[1])
+            remainder = q[archive_id.end():].strip()
+            if archive_id[2]:
+                document_place = canonical.get(int(archive_id[1]))
+                current_place = re.match(re.escape(document_place) + r'(?=$|\s)', remainder) if document_place else None
+                if current_place:
+                    remainder = remainder[current_place.end():]
+                else:
+                    # shortcut: renamed locations containing spaces need the bare archive ID until export labels delimit them.
+                    old_place_and_terms = remainder.split(maxsplit=1)
+                    remainder = old_place_and_terms[1] if len(old_place_and_terms) == 2 else ''
+                fields = record_fields
+            terms = remainder.split()
+        elif copied_label:
+            base += ' AND s.label=?'
+            args.append(q)
+            terms = []
+        if len(terms) > 10:
+            error("搜索内容请控制在200字、10个关键词以内")
+        for term in terms:
+            like = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            base += " AND (" + " OR ".join(field + " LIKE ? ESCAPE '\\'" for field in fields)
+            base += " OR EXISTS (SELECT 1 FROM event_parts p WHERE p.event_id=v.id AND p.name LIKE ? ESCAPE '\\'))"
+            args.extend([like] * (len(fields) + 1))
+        # The two result queries share one label per elevator from this read snapshot.
+        db.execute('CREATE TEMP TABLE search_locations(elevator_id INTEGER PRIMARY KEY, label TEXT NOT NULL)')
+        db.executemany('INSERT INTO search_locations VALUES(?,?)', labels.items())
         elevators_found = rows(db.execute("SELECT DISTINCT e.id,e.name,e.status,b.name building_name,u.name unit_name " + base + " ORDER BY b.name,u.name,e.name LIMIT 101", args))
         ids = [row[0] for row in db.execute("SELECT DISTINCT v.id " + base + " AND v.id IS NOT NULL ORDER BY v.occurred_on DESC,v.id DESC LIMIT 101", args)]
-        return {"elevators": elevators_found[:100], "events": [event_full(db, x) for x in ids[:100]],
+        return {"elevators": add_elevator_labels(elevators_found[:100], labels),
+                "events": add_elevator_labels([event_full(db, x) for x in ids[:100]], labels),
                 "truncated": len(elevators_found) > 100 or len(ids) > 100}
 
 
@@ -930,12 +1064,18 @@ def reminders_data(db):
 @app.get("/api/reminders")
 def reminders(user=Depends(actor)):
     with connect() as db:
-        return reminders_data(db)
+        db.execute('BEGIN')
+        items = reminders_data(db)
+        if items:
+            _, labels = active_elevator_labels(db)
+            add_elevator_labels(items, labels)
+        return items
 
 
 @app.get("/api/dashboard")
 def dashboard(user=Depends(actor)):
     with connect() as db:
+        db.execute('BEGIN')
         stats = dict(db.execute("""SELECT COUNT(*) total, SUM(status='正常') normal,
           SUM(status='故障') fault, SUM(status='维修中') repairing FROM elevators WHERE deleted_at IS NULL""").fetchone())
         month = date.today().strftime("%Y-%m")
@@ -945,7 +1085,9 @@ def dashboard(user=Depends(actor)):
         recent = rows(db.execute("""SELECT v.id,v.elevator_id,v.type,v.title,v.occurred_on,v.completed,e.name elevator_name,u.name unit_name,b.name building_name
            FROM events v JOIN elevators e ON e.id=v.elevator_id JOIN units u ON u.id=e.unit_id JOIN buildings b ON b.id=u.building_id
            WHERE v.deleted_at IS NULL AND e.deleted_at IS NULL ORDER BY v.occurred_on DESC,v.id DESC LIMIT 15"""))
-        return {"stats": stats, "reminders": reminders_data(db), "recent": recent}
+        upcoming = reminders_data(db)
+        _, labels = active_elevator_labels(db) if recent or upcoming else ({}, {})
+        return {"stats": stats, "reminders": add_elevator_labels(upcoming, labels), "recent": add_elevator_labels(recent, labels)}
 
 
 @app.get("/api/costs")

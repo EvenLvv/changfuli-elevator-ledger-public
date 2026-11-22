@@ -58,7 +58,7 @@ class ExportDraftTest(unittest.TestCase):
         self.assertLessEqual(len(empty['blocks']), 6)
         self.assertFalse(any('—' in b.get('text', '') for b in empty['blocks']))
         self.assertEqual(empty['metadata'], {'community': '昌福里社区27区党群物业服务站',
-                                           'scope_label': '18栋 1单元 1号梯', 'period_label': '全部历史资料'})
+                                           'scope_label': '18栋1口1号电梯', 'period_label': '全部历史资料'})
         self.assertFalse(empty['filters']['directory']); self.assertTrue(empty['filters']['package'])
         event = self.event(type='故障', completed=False, stopped=True, recovered=False,
                            fault_at='2026-10-28T08:00', reported_at='2026-10-28T08:02', arrived_at='2026-10-28T08:20',
@@ -120,11 +120,126 @@ class ExportDraftTest(unittest.TestCase):
             self.assertEqual(len(doc.inline_shapes), 2)
             cells = '\n'.join(cell.text for table in doc.tables for row in table.rows for cell in row.cells)
             self.assertNotIn('cgi-bin', text + cells); self.assertIn('未编入正文', cells)
-            self.assertEqual(doc.tables[-1].rows[1].cells[1].text, '18栋 1单元 1号梯\n门锁维修')
+            self.assertEqual(doc.tables[-1].rows[1].cells[1].text, '18栋1口1号电梯\n门锁维修')
         self.assertEqual(self.client.get(f'/api/events/{event}').json(), before)
         with connect() as db:
             self.assertEqual(db.execute('SELECT source_json FROM export_drafts WHERE id=?', (draft['id'],)).fetchone()[0], snapshot)
         self.assertEqual(self.client.get('/api/attachments/' + removed).content, removed_raw)
+
+    def test_same_number_legacy_archives_keep_their_identity_in_exports(self):
+        from backend.db import connect
+
+        older_draft = self.draft()
+        with connect() as db:
+            old_source = db.execute('SELECT source_json FROM export_drafts WHERE id=?', (older_draft['id'],)).fetchone()[0]
+            self.assertEqual(json.loads(old_source)[0]['export_label'], '18栋1口1号电梯')
+            db.execute('UPDATE elevators SET equipment_number=NULL WHERE id=?', (self.lift,))
+            other = db.execute('''INSERT INTO elevators(unit_id,name)
+                SELECT unit_id,'01号电梯' FROM elevators WHERE id=?''', (self.lift,)).lastrowid
+
+        labels = {lift: f'档案 {lift} · 18栋1口1号电梯' for lift in (self.lift, other)}
+        pictures, names, data = {}, {}, {}
+        for lift, color in ((self.lift, 'red'), (other, 'green')):
+            title = f'{color}门锁检查'
+            event = self.event(elevator_id=lift, title=title)
+            photo, raw = self.photo(event, color)
+            pictures[photo], names[title], data[labels[lift]] = labels[lift], labels[lift], raw
+
+        reloaded = self.client.get(f"/api/export-drafts/{older_draft['id']}").json()
+        for key in ('title', 'metadata', 'blocks', 'revision'):
+            self.assertEqual(reloaded[key], older_draft[key])
+
+        mixed_draft = self.draft(scope='all')
+        self.assertEqual({entry['id']: entry['elevator_label'] for entry in mixed_draft['attachment_directory']}, pictures)
+        headings = {block['text'] for block in mixed_draft['blocks'] if block['type'] == 'heading'}
+        self.assertLessEqual(set(labels.values()), headings)
+
+        mixed_exports = (self.prepare(mixed_draft, package=True), self.post('/api/export/prepare', {'scope': 'all', 'package': True}))
+        for index, output in enumerate(mixed_exports):
+            with zipfile.ZipFile(io.BytesIO(self.client.get(output['download']).content)) as archive:
+                doc = Document(io.BytesIO(archive.read(next(n for n in archive.namelist() if n.endswith('.docx')))))
+                text = '\n'.join(p.text for p in doc.paragraphs)
+                for title, label in names.items():
+                    self.assertRegex(text, f'电梯：{label}[^\n]*\n发生日期：[^\n]+\n工作事项：{title}')
+                    if index == 0:
+                        self.assertIn(f'{label}\n{title}', [row.cells[1].text for row in doc.tables[-1].rows])
+                manifest = csv.DictReader(io.StringIO(archive.read('原始附件清单.csv').decode('utf-8-sig')))
+                self.assertEqual({row['电梯']: archive.read(row['包内路径']) for row in manifest}, data)
+                self.assertTrue(all('..' not in n.split('/') for n in archive.namelist()))
+
+        for lift, label in labels.items():
+            with self.subTest(lift=lift):
+                single = self.draft(elevator_id=lift)
+                self.assertEqual(single['metadata']['scope_label'], label)
+                single_exports = (self.prepare(single), self.post('/api/export/prepare', {'scope': 'elevator', 'elevator_id': lift}))
+                for output in single_exports:
+                    self.assertIn(f'档案 {lift} · ', output['filename'])
+                    document = Document(io.BytesIO(self.client.get(output['download']).content))
+                    self.assertIn(label, '\n'.join(p.text for p in document.paragraphs))
+
+        with connect() as db:
+            db.execute('UPDATE elevators SET name=? WHERE id=?', ('2号电梯', other))
+        reloaded = self.client.get(f"/api/export-drafts/{mixed_draft['id']}").json()
+        self.assertEqual(reloaded['attachment_directory'], mixed_draft['attachment_directory'])
+        self.assertEqual(reloaded['blocks'], mixed_draft['blocks'])
+
+    def test_pre_upgrade_draft_keeps_original_labels_in_preview_and_export(self):
+        from backend.db import connect, now
+
+        with connect() as db:
+            other = db.execute('''INSERT INTO elevators(unit_id,name)
+                SELECT unit_id,'01号电梯' FROM elevators WHERE id=?''', (self.lift,)).lastrowid
+        source, blocks, labels = [], [], {}
+        for number, (lift, name, color) in enumerate(((self.lift, '1号梯', 'red'), (other, '01号电梯', 'green')), 1):
+            title = f'{color}门锁检查'
+            event = self.event(elevator_id=lift, title=title)
+            photo, _ = self.photo(event, color)
+            with connect() as db:
+                elevator = dict(db.execute('''SELECT e.*,u.name unit_name,u.building_id,b.name building_name
+                    FROM elevators e JOIN units u ON u.id=e.unit_id JOIN buildings b ON b.id=u.building_id
+                    WHERE e.id=?''', (lift,)).fetchone())
+                record = dict(db.execute('SELECT * FROM events WHERE id=?', (event,)).fetchone())
+                attachment = dict(db.execute('SELECT * FROM attachments WHERE id=?', (photo,)).fetchone())
+            attachment['archive_reference'] = f'图{number}-1'
+            record.update(record_number=number, parts=[], attachments=[attachment])
+            elevator['events'] = [record]
+            source.append(elevator)
+            label = f'18栋 1单元 {name}'
+            labels[title] = label
+            blocks.extend([{'id': f'h-{lift}', 'type': 'heading', 'text': label},
+                           {'id': f'p-{lift}', 'type': 'paragraph', 'text': f'电梯：{label}\n工作事项：{title}'},
+                           {'id': f'i-{lift}', 'type': 'image', 'attachment_id': photo, 'caption': '现场'}])
+
+        user = self.client.get('/api/me').json()['id']
+        for scope, old_source, old_blocks in (('all', source, blocks), ('elevator', source[1:], blocks[3:])):
+            with self.subTest(scope=scope):
+                scope_label = '全部电梯（2部电梯）' if scope == 'all' else '18栋 1单元 01号电梯'
+                filters = {'scope': scope, 'start': None, 'end': None, 'type': '全部', 'photos': True,
+                           'directory': True, 'package': True, 'elevator_id': other if scope == 'elevator' else None,
+                           'building_id': None, 'unit_id': None}
+                stamp = now()
+                snapshot = json.dumps(old_source, ensure_ascii=False)
+                body = json.dumps(old_blocks, ensure_ascii=False)
+                with connect() as db:
+                    draft_id = db.execute('''INSERT INTO export_drafts
+                        (created_by,title,filters_json,source_json,blocks_json,created_at,updated_at)
+                        VALUES(?,?,?,?,?,?,?)''', (user, '既有文稿', json.dumps(filters), snapshot, body, stamp, stamp)).lastrowid
+                draft = self.client.get(f'/api/export-drafts/{draft_id}').json()
+                self.assertEqual(draft['blocks'], old_blocks)
+                self.assertEqual(draft['metadata']['scope_label'], scope_label)
+                expected = {event['title']: labels[event['title']] for item in old_source for event in item['events']}
+                self.assertEqual({item['event_title']: item['elevator_label'] for item in draft['attachment_directory']}, expected)
+                output = self.prepare(draft, package=True)
+                with zipfile.ZipFile(io.BytesIO(self.client.get(output['download']).content)) as archive:
+                    word = Document(io.BytesIO(archive.read('既有文稿.docx')))
+                    self.assertIn('资料范围：' + scope_label, [p.text for p in word.paragraphs])
+                    self.assertEqual({row.cells[1].text for row in word.tables[-1].rows[1:]},
+                                     {f'{label}\n{title}' for title, label in expected.items()})
+                    manifest = csv.DictReader(io.StringIO(archive.read('原始附件清单.csv').decode('utf-8-sig')))
+                    self.assertEqual({item['来源记录']: item['电梯'] for item in manifest}, expected)
+                with connect() as db:
+                    saved = db.execute('SELECT source_json, blocks_json, revision FROM export_drafts WHERE id=?', (draft_id,)).fetchone()
+                    self.assertEqual(tuple(saved), (snapshot, body, 1))
 
     def test_validation_snapshot_whitelist_and_revision_are_required(self):
         event = self.event(); photo, _ = self.photo(event, 'red')

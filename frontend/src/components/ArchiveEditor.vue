@@ -2,12 +2,14 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { place } from '../location'
 
 type Block = { id:string; type:'heading'|'paragraph'|'image'; text?:string; attachment_id?:string; caption?:string }
 type Photo = { id:string; category:string; original_name:string; display_name?:string; event_title:string; event_date:string; elevator_label:string; url:string; available:boolean; unavailable_reason?:string }
 type Draft = { id:number; title:string; revision:number; created_by_name:string; updated_at:string; filters:any; metadata:{community:string;scope_label:string;period_label:string}; source_warnings:string[]; blocks:Block[]; images:Photo[]; attachment_directory:any[] }
 const props = defineProps<{
   buildings:any[]; units:any[]; elevators:any[];
+  elevatorLabels:Map<number,string>;
   api:(path:string, options?:any)=>Promise<any>;
   download:(path:string, filename?:string)=>void;
 }>()
@@ -31,7 +33,6 @@ const content = () => JSON.stringify({title:draft.value?.title,blocks:draft.valu
 const dirty = computed(() => !!draft.value && content() !== savedContent.value)
 const exportUnits = computed(() => props.units.filter(x=>x.building_id===filters.value.building_id))
 const exportElevators = computed(() => props.elevators.filter(x=>(!filters.value.building_id||x.building_id===filters.value.building_id)&&(!filters.value.unit_id||x.unit_id===filters.value.unit_id)))
-const place = (x:any) => `${x.building_name}${x.unit_name}${x.elevator_name||x.name}`
 const scopeName = computed(() => {
   const f=filters.value
   if(f.scope==='all') return '全部电梯'
@@ -40,7 +41,7 @@ const scopeName = computed(() => {
   const unit=props.units.find(x=>x.id===f.unit_id)?.name||'请选择单元'
   if(f.scope==='unit') return `${building} ${unit}`
   const elevator=props.elevators.find(x=>x.id===f.elevator_id)
-  return elevator?place(elevator):'请选择电梯'
+  return elevator?(props.elevatorLabels.get(elevator.id) ?? place(elevator)):'请选择电梯'
 })
 const exportCount = computed(() => props.elevators.filter(e=>filters.value.scope==='all'||(e.building_id===filters.value.building_id&&(filters.value.scope==='building'||(e.unit_id===filters.value.unit_id&&(filters.value.scope==='unit'||e.id===filters.value.elevator_id))))).length)
 const imageNumbers = computed(() => {
@@ -218,7 +219,7 @@ onBeforeUnmount(()=>{removeGuard();window.removeEventListener('beforeunload',bef
             <div class="form-grid scope-fields">
               <el-form-item v-if="filters.scope!=='all'" label="楼栋"><el-select v-model="filters.building_id" placeholder="选择楼栋" @change="filters.unit_id=null;filters.elevator_id=null"><el-option v-for="b in buildings" :key="b.id" :label="b.name" :value="b.id"/></el-select></el-form-item>
               <el-form-item v-if="['unit','elevator'].includes(filters.scope)" label="单元"><el-select v-model="filters.unit_id" placeholder="选择单元" @change="filters.elevator_id=null"><el-option v-for="u in exportUnits" :key="u.id" :label="u.name" :value="u.id"/></el-select></el-form-item>
-              <el-form-item v-if="filters.scope==='elevator'" label="电梯"><el-select v-model="filters.elevator_id" placeholder="选择电梯"><el-option v-for="e in exportElevators" :key="e.id" :label="place(e)" :value="e.id"/></el-select></el-form-item>
+              <el-form-item v-if="filters.scope==='elevator'" label="电梯"><el-select v-model="filters.elevator_id" :class="{'elevator-select-conflict': elevatorLabels.has(filters.elevator_id)}" placeholder="选择电梯"><el-option v-for="e in exportElevators" :key="e.id" :label="elevatorLabels.get(e.id) ?? place(e)" :value="e.id" :class="{'elevator-option-conflict': elevatorLabels.has(e.id)}"/></el-select></el-form-item>
             </div>
           </section>
           <section class="export-step"><div class="step-heading"><span>2</span><div><h2>确定统计周期</h2><p>不填写日期时，包含全部历史工作。</p></div></div>
