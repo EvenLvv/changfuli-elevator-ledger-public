@@ -82,6 +82,8 @@ class ExportFormatTest(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
             manifest = list(csv.DictReader(io.StringIO(archive.read('原始附件清单.csv').decode('utf-8-sig'))))
             self.assertEqual([r['资料编号'] for r in manifest], ['图1-1','图1-2','图2-1'])
+            self.assertEqual({r['电梯'] for r in manifest}, {'18栋1口1号电梯'})
+            self.assertTrue(all(r['包内路径'].startswith('附件/18栋1单元1号梯/') for r in manifest))
             self.assertEqual(archive.read(manifest[0]['包内路径']), second_raw)
             self.assertEqual(archive.read(manifest[1]['包内路径']), first_raw)
             self.assertEqual(manifest[1]['原始文件名'], names[0])

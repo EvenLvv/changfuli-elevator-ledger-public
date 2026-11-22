@@ -53,6 +53,263 @@ class AcceptanceAudit(unittest.TestCase):
         self.assertEqual(self.client.get(f'/api/elevators/{lift}').json()['building_name'],'21栋')
         self.assertEqual(self.client.post('/api/elevators',json={**data,'building_name':'','unit_name':'未建单元'}).status_code,400)
 
+    def test_numbered_elevator_reuses_legacy_location_and_reserves_number_per_unit(self):
+        numbered = {'building_number':'018','unit_number':'01','elevator_number':'1'}
+        response = self.client.post('/api/elevators', json=numbered)
+        self.assertEqual(response.status_code, 409, response.text)
+        lift = self.post('/api/elevators', {**numbered, 'elevator_number':'2'})['id']
+        record = self.client.get(f'/api/elevators/{lift}').json()
+        self.assertEqual((record['building_id'], record['unit_id'], record['name']), (self.building, self.unit, '2号电梯'))
+        self.post('/api/elevators', {**numbered, 'unit_number':'2'})
+        self.post('/api/elevators', {**numbered, 'building_number':'2'})
+        for field, value in (('building_number','18栋'), ('unit_number','2.5'), ('unit_number','0'), ('elevator_number','3')):
+            self.assertEqual(self.client.post('/api/elevators', json={**numbered, field:value}).status_code, 400)
+        match = self.client.get('/api/search', params={'q':'18栋1口1号电梯'}).json()
+        self.assertEqual([item['id'] for item in match['elevators']], [self.elevator])
+
+        path = f'/api/elevators/{self.elevator}'
+        legacy = self.client.get(path).json()
+        update = self.client.put(path, json={**legacy, **numbered, 'notes':'复核完成'})
+        self.assertEqual(update.status_code, 200, update.text)
+        latest = self.client.get(path).json()
+        self.assertEqual((latest['unit_name'], latest['name'], latest['notes']), ('1单元','1号梯','复核完成'))
+        self.assertEqual(self.client.put(path, json={**latest, **numbered, 'elevator_number':'2'}).status_code, 409)
+        self.assertEqual(self.client.delete(path).status_code, 200)
+        self.assertEqual(self.client.post('/api/elevators', json=numbered).status_code, 409)
+
+    def test_numbered_elevator_edit_keeps_existing_building_when_changing_unit(self):
+        from backend.db import connect
+
+        target_unit = self.post('/api/units', {'building_id': self.building, 'name': '2单元'})['id']
+        with connect() as db:
+            alias = db.execute('INSERT INTO buildings(name) VALUES(?)', ('018号楼',)).lastrowid
+            db.execute('INSERT INTO units(building_id,name) VALUES(?,?)', (alias, '2口'))
+            db.executemany('INSERT INTO buildings(name) VALUES(?)', [('20栋',), ('020号楼',)])
+
+        path = f'/api/elevators/{self.elevator}'
+        numbered = {'building_number': '018', 'unit_number': '2', 'elevator_number': '1'}
+        record = self.client.get(path).json()
+        response = self.client.put(path, json={**record, **numbered})
+        self.assertEqual(response.status_code, 200, response.text)
+        moved = self.client.get(path).json()
+        self.assertEqual((moved['building_id'], moved['unit_id'], moved['name']), (self.building, target_unit, '1号梯'))
+
+        audit = self.client.get('/api/audit').json()
+        response = self.client.put(path, json={**moved, **numbered, 'building_number': '20'})
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn('多条旧档案', response.json()['detail'])
+        self.assertEqual(self.client.get(path).json(), moved)
+        self.assertEqual(self.client.get('/api/audit').json(), audit)
+
+    def test_numbered_elevator_edit_rejects_deleted_parent_without_changes(self):
+        from backend.db import connect, now
+
+        path = f'/api/elevators/{self.elevator}'
+        numbered = {'building_number': '18', 'elevator_number': '1'}
+        for table, record_id, name, unit_number in (
+            ('buildings', self.building, '18栋', '1'),
+            ('buildings', self.building, '18栋', '2'),
+            ('units', self.unit, '1单元', '1'),
+        ):
+            with self.subTest(table=table, unit_number=unit_number):
+                record = self.client.get(path).json()
+                audit = self.client.get('/api/audit').json()
+                with connect() as db:
+                    db.execute(f'UPDATE {table} SET deleted_at=? WHERE id=?', (now(), record_id))
+                response = self.client.put(path, json={**record, **numbered, 'unit_number': unit_number, 'notes': '应拒绝保存'})
+                with connect() as db:
+                    db.execute(f'UPDATE {table} SET deleted_at=NULL WHERE id=?', (record_id,))
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()['detail'], f'{name}已删除，请先在系统管理中恢复')
+                self.assertEqual(self.client.get(path).json(), record)
+                self.assertEqual(self.client.get('/api/audit').json(), audit)
+
+    def test_numbered_location_rejects_ambiguity_and_excel_preserves_legacy_aliases(self):
+        from backend.archive_excel import workbook_bytes
+        from backend.db import connect
+
+        self.assertEqual(self.client.post('/api/buildings', json={'name':'018号楼'}).status_code, 409)
+        self.assertEqual(self.client.post('/api/units', json={'building_id':self.building,'name':'1口'}).status_code, 409)
+        other_building = self.post('/api/buildings', {'name':'东楼'})['id']
+        self.assertEqual(self.client.put(f'/api/buildings/{other_building}', json={'name':'18'}).status_code, 409)
+        other_unit = self.post('/api/units', {'building_id':self.building,'name':'东侧'})['id']
+        self.assertEqual(self.client.put(f'/api/units/{other_unit}', json={'name':'01单元口'}).status_code, 409)
+
+        with connect() as db:
+            db.execute('INSERT INTO units(building_id,name) VALUES(?,?)', (self.building, '1口'))
+        response = self.client.post('/api/elevators', json={'building_number':'18','unit_number':'1','elevator_number':'2'})
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn('多条旧档案', response.json()['detail'])
+
+        def upload(records):
+            return self.client.post('/api/elevator-archives/import?dry_run=false',
+                files={'file':('档案.xlsx', workbook_bytes(records))}).json()
+
+        old = {'building_name':'18栋','unit_name':'1单元','name':'1号梯'}
+        self.assertEqual(upload([{**old, 'building_name':'18', 'name':'1号电梯'}])['skipped'], 1)
+        same_unit = {**old, 'unit_name':'2口', 'name':'2号电梯'}
+        self.assertFalse(upload([same_unit, {**same_unit, 'unit_name':'02单元', 'name':'2号梯'}])['valid'])
+        self.assertEqual(len(self.client.get('/api/units').json()), 3)
+        exported = self.client.get('/api/elevator-archives/export')
+        replay = self.client.post('/api/elevator-archives/import?dry_run=false',
+            files={'file':('档案.xlsx', exported.content)}).json()
+        self.assertEqual((replay['added'], replay['skipped']), (0, 1))
+
+    def test_excel_rejects_distinct_parent_names_that_resolve_to_one_location(self):
+        from backend.archive_excel import workbook_bytes
+
+        endpoints = ('/api/buildings', '/api/units', '/api/elevators', '/api/audit')
+        original = [self.client.get(path).json() for path in endpoints]
+        for building, field, alias, unit in (
+            ('44栋', 'building_name', '044号楼', '2口'),
+            ('45栋', 'unit_name', '1口', '1口'),
+        ):
+            first = {'building_name': building, 'unit_name': '1单元', 'name': '1号梯'}
+            second = {**first, 'unit_name': unit, field: alias, 'name': '2号梯'}
+            workbook = workbook_bytes([first, second])
+            for dry_run in (True, False):
+                with self.subTest(field=field, dry_run=dry_run):
+                    response = self.client.post('/api/elevator-archives/import', params={'dry_run': dry_run},
+                        files={'file': ('档案.xlsx', workbook)})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    result = response.json()
+                    self.assertFalse(result['valid'], result)
+                    self.assertEqual((result['added'], result['skipped']), (0, 0))
+                    self.assertIn('第3行', result['errors'][0])
+                    self.assertIn(first[field], result['errors'][0])
+                    self.assertIn(alias, result['errors'][0])
+                    self.assertEqual([self.client.get(path).json() for path in endpoints], original)
+
+    def test_excel_keeps_exact_legacy_parents_distinct(self):
+        from backend.archive_excel import workbook_bytes
+        from backend.db import connect
+
+        with connect() as db:
+            other_unit = db.execute('INSERT INTO units(building_id,name) VALUES(?,?)', (self.building, '1口')).lastrowid
+            other_building = db.execute('INSERT INTO buildings(name) VALUES(?)', ('018号楼',)).lastrowid
+            other_building_unit = db.execute('INSERT INTO units(building_id,name) VALUES(?,?)', (other_building, '1单元')).lastrowid
+
+        records = [
+            {'building_name': '18栋', 'unit_name': '1单元', 'name': '2号梯'},
+            {'building_name': '18栋', 'unit_name': '1口', 'name': '2号梯'},
+            {'building_name': '018号楼', 'unit_name': '1单元', 'name': '2号梯'},
+        ]
+        workbook = workbook_bytes(records)
+        response = self.client.post('/api/elevator-archives/import', params={'dry_run': False},
+            files={'file': ('档案.xlsx', workbook)})
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result['added'], 3, response.text)
+        self.assertEqual([row['place'] for row in result['rows']], [
+            '18栋 / 1单元 / 2号梯',
+            '18栋 / 1口 / 2号梯',
+            '018号楼 / 1单元 / 2号梯',
+        ])
+        lifts = self.client.get('/api/elevators').json()
+        self.assertCountEqual([lift['unit_id'] for lift in lifts if lift['name'] == '2号梯'],
+            [self.unit, other_unit, other_building_unit])
+
+    def test_excel_preview_shows_where_legacy_aliases_will_resolve(self):
+        from backend.archive_excel import workbook_bytes
+
+        rows = [{'building_name': '018号楼', 'unit_name': '01单元', 'name': name}
+                for name in ('2号梯', '01号电梯')]
+        files = {'file': ('档案.xlsx', workbook_bytes(rows))}
+        expected = [
+            {'row': 2, 'action': '新增', 'place': '表格：018号楼 / 01单元 / 2号梯 → 实际：18栋 / 1单元 / 2号梯'},
+            {'row': 3, 'action': '跳过', 'place': '表格：018号楼 / 01单元 / 01号电梯 → 实际：18栋 / 1单元 / 1号梯'},
+        ]
+        preview = self.client.post('/api/elevator-archives/import', files=files)
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(preview.json()['rows'], expected)
+        self.assertEqual([item['id'] for item in self.client.get('/api/elevators').json()], [self.elevator])
+
+        commit = self.client.post('/api/elevator-archives/import?dry_run=false', files=files)
+        self.assertEqual(commit.status_code, 200, commit.text)
+        self.assertEqual(commit.json()['rows'], expected)
+        elevators = self.client.get('/api/elevators').json()
+        self.assertCountEqual([(item['name'], item['building_id'], item['unit_id']) for item in elevators],
+                              [('1号梯', self.building, self.unit), ('2号梯', self.building, self.unit)])
+
+    def test_excel_preview_preserves_location_field_boundaries(self):
+        from backend.archive_excel import workbook_bytes
+
+        records = [
+            {'building_name': '东区', 'unit_name': '北楼', 'name': '客梯'},
+            {'building_name': '东', 'unit_name': '区北楼', 'name': '客梯'},
+        ]
+        response = self.client.post('/api/elevator-archives/import',
+            files={'file': ('档案.xlsx', workbook_bytes(records))})
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertTrue(result['valid'], result)
+        self.assertEqual([row['place'] for row in result['rows']], ['东区 / 北楼 / 客梯', '东 / 区北楼 / 客梯'])
+        self.assertEqual([lift['id'] for lift in self.client.get('/api/elevators').json()], [self.elevator])
+
+    def test_excel_confirmation_rejects_changed_preview_targets(self):
+        from backend.archive_excel import workbook_bytes
+
+        files = {'file': ('档案.xlsx', workbook_bytes([
+            {'building_name': '新建位置', 'unit_name': '1口', 'name': '1号梯'},
+            {'building_name': '18', 'unit_name': '1单元', 'name': '2号梯'},
+        ]))}
+        path = '/api/elevator-archives/import'
+        preview = self.client.post(path, files=files).json()
+        self.assertIn('实际：18栋 / 1单元 / 2号梯', preview['rows'][1]['place'])
+        self.assertEqual(self.client.put(f'/api/buildings/{self.building}', json={'name': '19栋'}).status_code, 200)
+        replacement = self.post('/api/buildings', {'name': '018号楼'})['id']
+        endpoints = ('/api/buildings', '/api/units', '/api/elevators', '/api/audit')
+        original = [self.client.get(url).json() for url in endpoints]
+
+        for token in ('', preview['preview_token']):
+            with self.subTest(token=token):
+                commit = self.client.post(path, params={'dry_run': False}, files=files, data={'preview_token': token})
+                self.assertEqual(commit.status_code, 409, commit.text)
+                self.assertIn('重新检查表格', commit.json()['detail'])
+                self.assertEqual([self.client.get(url).json() for url in endpoints], original)
+
+        unit = self.post('/api/units', {'building_id': replacement, 'name': '1单元'})['id']
+        fresh = self.client.post(path, files=files).json()
+        self.assertIn('实际：018号楼 / 1单元 / 2号梯', fresh['rows'][1]['place'])
+        self.post('/api/elevators', {'unit_id': unit, 'name': '2号梯'})
+        commit = self.client.post(path, params={'dry_run': False}, files=files,
+                                  data={'preview_token': fresh['preview_token']})
+        self.assertEqual(commit.status_code, 409, commit.text)
+        self.assertNotIn('新建位置', {row['name'] for row in self.client.get('/api/buildings').json()})
+
+        fresh = self.client.post(path, files=files).json()
+        self.post('/api/buildings', {'name': '无关的新楼栋'})
+        commit = self.client.post(path, params={'dry_run': False}, files=files,
+                                  data={'preview_token': fresh['preview_token']})
+        self.assertEqual(commit.status_code, 200, commit.text)
+        self.assertTrue(commit.json()['committed'])
+        self.assertEqual((commit.json()['added'], commit.json()['skipped']), (1, 1))
+        self.assertIn(replacement, {row['building_id'] for row in self.client.get('/api/elevators').json()})
+
+    def test_excel_reimport_uses_indexes_for_exact_names(self):
+        from contextlib import contextmanager
+        from unittest.mock import patch
+        from backend.db import connect
+
+        workbook = self.client.get('/api/elevator-archives/export').content
+        statements = []
+
+        @contextmanager
+        def traced_connect():
+            with connect() as db:
+                db.set_trace_callback(statements.append)
+                yield db
+
+        with patch('backend.main.connect', traced_connect):
+            response = self.client.post('/api/elevator-archives/import', files={'file': ('档案.xlsx', workbook)})
+        self.assertEqual(response.json()['skipped'], 1)
+        lookups = [sql for sql in statements if sql.startswith('SELECT id,name,deleted_at FROM ')]
+        self.assertCountEqual([sql.split()[3] for sql in lookups], ['buildings', 'units', 'elevators'])
+        with connect() as db:
+            for sql in lookups:
+                plan = db.execute('EXPLAIN QUERY PLAN ' + sql).fetchone()['detail']
+                self.assertRegex(plan, r'USING INDEX sqlite_autoindex_\w+ \([^)]*name=\?\)', plan)
+
     def test_excel_preview_commit_repeat_and_export(self):
         from backend.archive_excel import workbook_bytes
         from openpyxl import load_workbook
@@ -76,7 +333,8 @@ class AcceptanceAudit(unittest.TestCase):
     def test_excel_invalid_batch_is_atomic(self):
         from backend.archive_excel import workbook_bytes
         base={'building_name':'不能留下的楼栋','unit_name':'1单元','name':'1号梯'}
-        for records in ([base,{**base,'name':'2号梯','inspection_on':'2026-02-30'}],[base,base]):
+        invalid = {**base, 'name': '2号梯', 'inspection_on': '2026-02-30'}
+        for records in ([base, invalid], [invalid, base], [base, base]):
             result=self.client.post('/api/elevator-archives/import?dry_run=false',files={'file':('批量.xlsx',workbook_bytes(records))})
             self.assertEqual(result.status_code,200,result.text)
             self.assertFalse(result.json()['valid'])
@@ -123,6 +381,68 @@ class AcceptanceAudit(unittest.TestCase):
         self.assertFalse(self.client.get('/api/search',params={'q':'门锁 电机'}).json()['events'])
         results=self.client.get('/api/search',params={'q':'18栋 精准维保'}).json()['events']
         self.assertEqual(len(results),1)
+
+    def test_search_calculates_location_once_per_elevator(self):
+        from unittest.mock import patch
+        from backend import location
+        from backend.db import connect
+
+        event = self.event(title='门锁维修')
+        with connect() as db:
+            db.executemany('''INSERT INTO events(elevator_id,type,title,occurred_on,created_by,created_at,updated_at)
+                SELECT elevator_id,type,title,occurred_on,created_by,created_at,updated_at FROM events WHERE id=?''',
+                [(event,)] * 124)
+
+        with patch.object(location, 'archive_number', wraps=location.archive_number) as parse:
+            response = self.client.get('/api/search', params={'q': '18栋1口1号电梯 门锁'})
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual([row['id'] for row in result['elevators']], [self.elevator])
+        self.assertEqual(len(result['events']), 100)
+        self.assertTrue(result['truncated'])
+        self.assertEqual(parse.call_count, 3)
+
+    def test_search_and_overview_disambiguate_old_locations_without_a_full_ledger(self):
+        from backend.db import connect
+
+        with connect() as db:
+            duplicate = db.execute('''INSERT INTO elevators(id,unit_id,name,maintenance_due_on,maintenance_company)
+                VALUES(?,?,?,?,?)''', (42, self.unit, '01号电梯', self.today, '门锁服务公司')).lastrowid
+            other = db.execute('INSERT INTO elevators(id,unit_id,name) VALUES(?,?,?)',
+                               (142, self.unit, '001号电梯')).lastrowid
+        self.event(elevator_id=other)
+        other_work = self.event(elevator_id=duplicate, title='电机巡查')
+        event_id = self.event(elevator_id=duplicate, title='更换门锁')
+        label = f'18栋1口1号电梯（档案 {duplicate} · 18栋 / 1单元 / 01号电梯）'
+        for query, events in ((label, [event_id, other_work]), ('档案 42', [event_id, other_work]),
+                              ('档案 42 · 18栋1口1号电梯', [event_id, other_work]),
+                              ('档案 42 · 18栋1口1号电梯 门锁', [event_id])):
+            with self.subTest(query=query):
+                results = self.client.get('/api/search', params={'q': query}).json()
+                self.assertEqual([(item['id'], item['location_label']) for item in results['elevators']], [(duplicate, label)])
+                self.assertEqual([(item['id'], item['location_label']) for item in results['events']], [(i, label) for i in events])
+        dashboard = self.client.get('/api/dashboard').json()
+        self.assertEqual(dashboard['recent'][0]['location_label'], label)
+        self.assertEqual(self.client.get('/api/reminders').json()[0]['location_label'], label)
+        ordinary = self.client.get('/api/search', params={'q': '门锁服务公司'}).json()
+        self.assertEqual([item['id'] for item in ordinary['events']], [event_id, other_work])
+
+    def test_search_saved_word_label_after_renaming_building(self):
+        from backend.db import connect
+
+        with connect() as db:
+            db.execute('INSERT INTO elevators(unit_id,name) VALUES(?,?)', (self.unit, '01号梯'))
+        event = self.event(title='更换门锁')
+        self.event(title='电机巡查')
+        exported = self.client.get('/api/export', params={'scope': 'elevator', 'elevator_id': self.elevator})
+        self.assertEqual(exported.status_code, 200)
+        old_label = next(p.text.removeprefix('电梯：') for p in Document(io.BytesIO(exported.content)).paragraphs
+                         if p.text.startswith('电梯：档案 '))
+        self.assertEqual(old_label, f'档案 {self.elevator} · 18栋1口1号电梯')
+        self.assertEqual(self.client.put(f'/api/buildings/{self.building}', json={'name': '19栋'}).status_code, 200)
+        results = self.client.get('/api/search', params={'q': old_label + ' 门锁'}).json()
+        self.assertEqual([item['id'] for item in results['elevators']], [self.elevator])
+        self.assertEqual([item['id'] for item in results['events']], [event])
 
     def test_validation_is_chinese_client_error(self):
         for value in ['Infinity','sNaN','NaN','-1','12.345']:

@@ -44,7 +44,7 @@ const credentials={username:process.env.ARCHIVE_EDITOR_USERNAME||'archive-ui',di
   await page.clock.setFixedTime(realTime);
   await page.locator('.el-radio-button').filter({hasText:'某部电梯'}).click();
   async function select(label,name){await page.locator('.el-select').filter({has:page.getByLabel(label,{exact:true})}).click();await page.getByRole('option',{name,exact:true}).click()}
-  await select('楼栋',building);await select('单元','1单元');await select('电梯',building+'1单元1号梯');
+  await select('楼栋',building);await select('单元','1单元');await select('电梯',building+'1口1号电梯');
   await page.getByLabel('开始日期',{exact:true}).fill('2026-10-01');await page.getByLabel('结束日期',{exact:true}).fill('2026-10-31');
   await page.screenshot({path:path.join(out,'01-range-desktop.png'),fullPage:true});
   const originalDownload=page.waitForEvent('download');await page.getByRole('button',{name:'直接导出原始档案',exact:true}).click();await (await originalDownload).saveAs(path.join(out,'原始工作档案.docx'));

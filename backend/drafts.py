@@ -14,6 +14,7 @@ from . import db as store
 from .exporter import (add_heading, add_page_numbers, add_table, add_text,
                        configure_document, cover_line, paragraph_format,
                        safe_name, set_font, yuan)
+from .location import export_elevator_label
 
 
 def source_attachments(source):
@@ -31,7 +32,7 @@ def initial_blocks(source, photos=True):
         return '；'.join(f'{name}：{item[key]}' for key, name in pairs if item.get(key) not in (None, ''))
 
     for elevator in source:
-        label = f"{elevator['building_name']} {elevator['unit_name']} {elevator['name']}"
+        label = export_elevator_label(elevator)
         add('heading', label)
         for pairs in ((('internal_number', '内部编号'), ('equipment_number', '设备编号'), ('brand', '品牌'),
                        ('model', '型号'), ('manufactured_on', '出厂日期'), ('started_on', '投用日期')),
@@ -79,11 +80,11 @@ def draft_metadata(source, filters):
     first = source[0]
     buildings = list(dict.fromkeys(e['building_name'] for e in source))
     if len(source) == 1:
-        scope = f"{first['building_name']} {first['unit_name']} {first['name']}"
+        scope = export_elevator_label(first)
     else:
         scope = {'building': first['building_name'], 'unit': f"{first['building_name']} {first['unit_name']}"}.get(filters['scope'], '全部电梯')
         scope += f"（{len(source)}部电梯）"
-    if len(scope) > 60:
+    if len(scope) > 60 and not (len(source) == 1 and first.get('export_label_conflict')):
         scope = f'{len(buildings)}栋楼 共{len(source)}部电梯'
     start, end = filters['start'], filters['end']
     period = f'{start} 至 {end}' if start and end else f'自{start}起' if start else f'截至{end}' if end else '全部历史资料'
@@ -100,7 +101,7 @@ def source_status(source):
                 JOIN buildings b ON b.id=u.building_id WHERE e.id=? AND e.deleted_at IS NULL
                 AND u.deleted_at IS NULL AND b.deleted_at IS NULL''', (elevator['id'],)).fetchone()
             if not live_elevator:
-                issues.append(f"来源电梯或所属楼栋、单元已删除：{elevator['building_name']} {elevator['unit_name']} {elevator['name']}")
+                issues.append(f"来源电梯或所属楼栋、单元已删除：{export_elevator_label(elevator)}")
             for event in elevator['events']:
                 live = db.execute('''SELECT v.id FROM events v JOIN elevators e ON e.id=v.elevator_id
                     JOIN units u ON u.id=e.unit_id JOIN buildings b ON b.id=u.building_id
@@ -137,7 +138,7 @@ def attachment_directory(source, blocks, status):
         reason = status.get(attachment['id'], '')
         entries.append({'id': attachment['id'], 'event_id': event['id'], 'event_title': event['title'],
                         'event_date': event['occurred_on'],
-                        'elevator_label': f"{elevator['building_name']} {elevator['unit_name']} {elevator['name']}",
+                        'elevator_label': export_elevator_label(elevator),
                         'category': attachment['category'], 'original_name': attachment['original_name'], 'source_order': len(entries),
                         'display_name': f"{event['occurred_on']} {attachment['category']}" if photo else attachment['original_name'],
                         'reference': references.get(attachment['id'], '未编入正文' if photo else f'附件{file_number}'),
