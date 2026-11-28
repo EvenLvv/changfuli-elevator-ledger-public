@@ -20,6 +20,7 @@ import sqlite3
 import stat
 import struct
 import sys
+import tempfile
 import threading
 import time
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -122,6 +123,30 @@ def _safe_legacy_entry(path, *, directory):
     return not _is_reparse_or_wrong_type(info, directory=directory)
 
 
+def _copy_legacy_file(source, destination, data_root):
+    relative = destination.relative_to(data_root)
+    checked_data_path(data_root, relative)
+    if destination.exists() and destination.stat().st_size == source.stat().st_size:
+        with source.open('rb') as original, destination.open('rb') as existing:
+            if hashlib.file_digest(original, 'sha256').digest() == hashlib.file_digest(existing, 'sha256').digest():
+                return 0
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix='.legacy-', suffix='.tmp', delete=False) as handle:
+        temporary = Path(handle.name)
+    try:
+        shutil.copy2(source, temporary)
+        os.replace(temporary, checked_data_path(data_root, relative))
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except PermissionError:
+            # copy2 may have copied the Windows read-only attribute before replacement failed.
+            checked_data_path(data_root, temporary.relative_to(data_root)).chmod(stat.S_IWRITE)
+            temporary.unlink()
+    return 1
+
+
 def _copy_legacy_tree(source_dir, target_dir, data_root, *, skip_names=()):
     copied = 0
     stack = [source_dir]
@@ -147,12 +172,7 @@ def _copy_legacy_tree(source_dir, target_dir, data_root, *, skip_names=()):
             elif stat.S_ISREG(info.st_mode):
                 if current == source_dir and entry.name in skip_names:
                     continue
-                destination_file = target_dir / relative
-                checked_data_path(data_root, destination_file.relative_to(data_root), directory=False)
-                destination_file.parent.mkdir(parents=True, exist_ok=True)
-                if not destination_file.exists():
-                    shutil.copy2(entry, destination_file)
-                    copied += 1
+                copied += _copy_legacy_file(entry, target_dir / relative, data_root)
     return copied
 
 

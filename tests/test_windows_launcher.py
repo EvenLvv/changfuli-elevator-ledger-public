@@ -324,6 +324,51 @@ async def app(scope, receive, send):
         self.assertFalse(any(method == 'POST' for method, _ in v1_requests))
         self.assertIsNone(launcher.NoRedirect().redirect_request(None, None, 302, '', {}, 'https://example.invalid'))
 
+    def test_legacy_attachment_retry_repairs_partial_or_different_content(self):
+        source_dir = self.root / 'legacy-photos'
+        source_dir.mkdir()
+        target_dir = self.data / 'storage'
+        source = source_dir / 'photo.png'
+        destination = target_dir / source.name
+        content = b'complete photo'
+        source.write_bytes(content)
+
+        def interrupt_copy(src, tmp):
+            tmp = Path(tmp)
+            self.assertEqual(tmp.parent, destination.parent)
+            self.assertNotEqual(tmp, destination)
+            tmp.write_bytes(b'interrupted')
+            raise OSError('copy interrupted')
+
+        for leftover in (b'partial', b'x' * len(content)):
+            with self.subTest(leftover=leftover):
+                destination.write_bytes(leftover)
+                # Equal timestamps and lengths alone cannot establish a match.
+                os.utime(destination, ns=(source.stat().st_atime_ns, source.stat().st_mtime_ns))
+                with patch.object(shutil, 'copy2', side_effect=interrupt_copy), self.assertRaises(OSError):
+                    launcher._copy_legacy_tree(source_dir, target_dir, self.data)
+                self.assertEqual(list(target_dir.iterdir()), [destination])
+                self.assertEqual(destination.read_bytes(), leftover)
+
+                self.assertEqual(launcher._copy_legacy_tree(source_dir, target_dir, self.data), 1)
+                self.assertEqual(destination.read_bytes(), content)
+                self.assertEqual(source.read_bytes(), content)
+
+    def test_legacy_attachment_with_identical_content_is_preserved(self):
+        source_dir = self.root / 'legacy-photos'
+        source_dir.mkdir()
+        target_dir = self.data / 'storage'
+        source = source_dir / 'photo.png'
+        destination = target_dir / source.name
+        source.write_bytes(b'complete photo')
+        destination.write_bytes(source.read_bytes())
+        os.utime(destination, (1234567890, 1234567890))
+        original_mtime = destination.stat().st_mtime_ns
+
+        self.assertEqual(launcher._copy_legacy_tree(source_dir, target_dir, self.data), 0)
+        self.assertEqual(destination.stat().st_mtime_ns, original_mtime)
+        self.assertEqual(destination.read_bytes(), source.read_bytes())
+
     def test_legacy_v1_data_migration_copies_when_empty_preserves_old_and_never_overwrites(self):
         legacy_program_data = self.root / 'ProgramData'
         legacy_root = legacy_program_data / 'ChangfuliElevatorLedger'
