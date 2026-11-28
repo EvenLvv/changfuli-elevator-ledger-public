@@ -5,6 +5,7 @@ import zipfile
 from datetime import datetime
 
 from .db import BACKUPS, COMMUNITY, DB, STORAGE, now
+from .drafts import DRAFT_PHOTO_FOLDER, draft_photo_path
 
 # ponytail: serialize backups on this single-server deployment to keep retention predictable.
 _backup_lock = threading.Lock()
@@ -21,11 +22,14 @@ def create_backup():
             copy = sqlite3.connect(snapshot)
             try:
                 source.backup(copy)
+                copy.row_factory = sqlite3.Row
                 copy.execute('DELETE FROM sessions')
                 copy.commit()
                 copy.execute('PRAGMA wal_checkpoint(TRUNCATE)')
                 copy.execute('PRAGMA journal_mode=DELETE')
                 referenced = copy.execute('SELECT original_name,relative_path FROM attachments').fetchall()
+                has_draft_photos = copy.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='draft_photos'").fetchone()
+                draft_photos = copy.execute('SELECT original_name,relative_path,size FROM draft_photos').fetchall() if has_draft_photos else ()
             finally:
                 copy.close()
                 source.close()
@@ -33,11 +37,23 @@ def create_backup():
                 path = (STORAGE / relative).resolve()
                 if not path.is_relative_to(STORAGE.resolve()) or not path.is_file():
                     raise ValueError(f'附件缺失，备份未完成：{name}')
+            draft_paths = []
+            for photo in draft_photos:
+                path = draft_photo_path(photo)
+                if path is None:
+                    raise ValueError(f"文稿原图缺失或文件无效，备份未完成：{photo['original_name']}")
+                draft_paths.append((path, photo['relative_path']))
             with zipfile.ZipFile(partial, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
                 archive.write(snapshot, 'data/elevator.db')
-                for path in STORAGE.rglob('*'):
-                    if path.is_file() and path.resolve().is_relative_to(STORAGE.resolve()):
-                        archive.write(path, 'storage/' + path.relative_to(STORAGE).as_posix())
+                for folder in STORAGE.iterdir():
+                    if folder.name == DRAFT_PHOTO_FOLDER:
+                        continue
+                    for path in folder.rglob('*') if folder.is_dir() else (folder,):
+                        if path.is_file() and path.resolve().is_relative_to(STORAGE.resolve()):
+                            archive.write(path, 'storage/' + path.relative_to(STORAGE).as_posix())
+                # The snapshot determines which draft photos are committed, even if a save is in progress.
+                for path, relative in draft_paths:
+                    archive.write(path, 'storage/' + relative)
                 archive.writestr('backup_info.json', json.dumps({'created_at': now(), 'format': 1,
                     'community': COMMUNITY, 'settings': '数据库 system_settings 表',
                     'sessions': '恢复后需重新登录'}, ensure_ascii=False))
