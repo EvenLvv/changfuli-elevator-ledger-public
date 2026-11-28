@@ -18,12 +18,12 @@ def text(value):
     return '' if value is None else str(value).strip()
 
 
-def timestamp(value, label):
+def timestamp(value, label, epoch):
     if value in (None, ''):
         return ''
     try:
         if type(value) in (int, float):
-            value = datetime(1899, 12, 30) + timedelta(days=value)
+            value = epoch + timedelta(days=value)
         elif type(value) is date:
             value = datetime.combine(value, time())
         elif not isinstance(value, datetime):
@@ -75,8 +75,8 @@ def read_official_workbook(workbook):
             notes.append('产权归属：' + text(row[5]))
         lifts.append((n, dict(building_name=building, unit_name=unit, name=name,
                               equipment_number=text(row[3]), internal_number=code, model=text(row[2]),
-                              started_on=timestamp(row[6], f'台账第{n}行投入使用时间')[:10],
-                              maintenance_company=text(row[7]), inspection_on=timestamp(row[8], f'台账第{n}行检验')[:10],
+                              started_on=timestamp(row[6], f'台账第{n}行投入使用时间', workbook.epoch)[:10],
+                              maintenance_company=text(row[7]), inspection_on=timestamp(row[8], f'台账第{n}行检验', workbook.epoch)[:10],
                               notes='\n'.join(filter(None, notes)))))
     headers = [['序号', '电梯安装地点', '设备型号', '电梯站数', '发生故障情况', '', '处理故障情况'],
                ['', '', '', '', '发生故障时间', '发生故障名称', '故障处理时间', '故障处理方法（含调试或更换配件的名称及数量）']]
@@ -85,8 +85,8 @@ def read_official_workbook(workbook):
             templates += 1
             continue
         location, symptom, remedy = (text(row[i]) for i in (1, 5, 7))
-        fault_at = timestamp(row[4], f'故障记录第{n}行发生')
-        ended_at = timestamp(row[6], f'故障记录第{n}行处理')
+        fault_at = timestamp(row[4], f'故障记录第{n}行发生', workbook.epoch)
+        ended_at = timestamp(row[6], f'故障记录第{n}行处理', workbook.epoch)
         if not fault_at or not symptom:
             raise ValueError(f'故障记录第{n}行缺少发生故障时间或故障名称')
         part = re.match(r'^更换\s*(.+)', remedy)
@@ -103,7 +103,7 @@ def location_key(location):
     label = ''.join(location.split())
     if label == '物业站':
         return ('物业站',)
-    match = re.fullmatch(r'[^0-9]*([0-9]+)栋([0-9]+)(?:单元|口)(?:([0-9]+)号?)?电梯', label)
+    match = re.fullmatch(r'(?:[^0-9]|[0-9]+[^0-9栋])*([0-9]+)栋([0-9]+)(?:单元|口)(?:([0-9]+)号?)?电梯', label)
     return tuple(str(int(v)) for v in match.groups() if v is not None) if match else None
 
 

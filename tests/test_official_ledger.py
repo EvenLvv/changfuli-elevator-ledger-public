@@ -8,7 +8,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from openpyxl import load_workbook
+from openpyxl.utils.datetime import CALENDAR_MAC_1904, CALENDAR_WINDOWS_1900
 
+from backend.official_ledger import location_key, read_official_workbook
 from support import isolated_app
 
 
@@ -38,6 +40,36 @@ class OfficialLedgerTest(unittest.TestCase):
         return self.client.post('/api/elevator-archives/import', params={'dry_run': token is None},
                                 files={'file': (FIXTURE.name, raw or FIXTURE.read_bytes())},
                                 data={} if token is None else {'preview_token': token})
+
+    def test_location_key(self):
+        for label in ('昌福里社区27区41栋1单元1号电梯', '41栋1单元1号电梯', '41栋 1单元 1电梯'):
+            self.assertEqual(location_key(label), ('41', '1', '1'))
+        self.assertEqual(location_key('馨河44栋1单元电梯'), ('44', '1'))
+        self.assertEqual(location_key('物业站'), ('物业站',))
+
+    def test_workbook_date_epochs(self):
+        for epoch, day in ((CALENDAR_WINDOWS_1900, '2021-01-04'), (CALENDAR_MAC_1904, '2025-01-05')):
+            with self.subTest(epoch=epoch):
+                workbook = load_workbook(FIXTURE)
+                workbook.epoch = epoch
+                assets, faults = workbook.worksheets[:2]
+                for cell in (assets['G3'], assets['I3'], faults['E4'], faults['G4']):
+                    cell.value = 44200
+                    cell.number_format = 'General'
+                faults['E5'] = datetime(2025, 1, 5, 8, 35)
+                stream = io.BytesIO()
+                workbook.save(stream)
+                workbook.close()
+                stream.seek(0)
+                workbook = load_workbook(stream, read_only=True)
+                try:
+                    ledger = read_official_workbook(workbook)
+                finally:
+                    workbook.close()
+                lift, fault = ledger.elevators[0][1], ledger.faults[0][2]
+                self.assertEqual((lift['started_on'], lift['inspection_on']), (day, day))
+                self.assertEqual((fault['fault_at'], fault['ended_at']), (day + 'T00:00:00',) * 2)
+                self.assertEqual(ledger.faults[1][2]['fault_at'], '2025-01-05T08:35:00')
 
     def test_two_sheet_preview_commit_and_reimport(self):
         self.setup_admin()
@@ -105,7 +137,7 @@ class OfficialLedgerTest(unittest.TestCase):
         faults['E4'] = datetime(2025, 1, 5, 8, 35)
         faults['G4'] = datetime(2025, 1, 5, 9, 40)
         faults['H4'] = '现场调试'
-        faults['B4'] = '41栋 1单元 1电梯'
+        faults['B4'] = '昌福里社区27区41栋1单元1号电梯'
         faults['K4'] = ' 维修资金 '
         stream = io.BytesIO()
         workbook.save(stream)
