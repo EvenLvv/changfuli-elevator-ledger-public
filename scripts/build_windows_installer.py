@@ -201,7 +201,7 @@ def main():
     parser.add_argument('--python-zip', type=Path, required=True, help='Official python-3.12.10-embed-amd64.zip')
     parser.add_argument('--wheelhouse', type=Path, default=ROOT / 'wheelhouse')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'outputs/windows-installer')
-    parser.add_argument('--version', default='2.0.2')
+    parser.add_argument('--version', default='2.0.3')
     parser.add_argument('--seed-ledger', type=Path, help='Explicitly copy this private workbook into the installer stage')
     parser.add_argument('--makensis', default=shutil.which('makensis'))
     parser.add_argument('--stage-only', action='store_true')

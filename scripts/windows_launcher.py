@@ -26,8 +26,8 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 APP_ID = 'ChangfuliElevatorDesktop'
 LEGACY_APP_ID = 'ChangfuliElevatorLedger'
-APP_VERSION = '2.0.2'
-WINDOW_TITLE = '昌福里社区电梯管理系统 2.0.2'
+APP_VERSION = '2.0.3'
+WINDOW_TITLE = '昌福里社区电梯管理系统'
 ICON_NAME = 'desktop-app-2.0.ico'
 WEBVIEW2_ERROR = '无法打开桌面窗口。请安装或修复 Microsoft Edge WebView2 Runtime，然后重新打开电梯管理系统。'
 PORT = 8766
@@ -477,7 +477,7 @@ def wait_existing(data_root, port, timeout=START_TIMEOUT):
             lock.close()
             break
         time.sleep(0.1)
-    raise RuntimeError('现有电梯台账 2.0 实例尚未就绪或无法验证，请查看日志；不会连接旧版或其他占用端口的服务。')
+    raise RuntimeError('现有电梯管理系统实例尚未就绪或无法验证，请查看日志；不会连接旧版或其他占用端口的服务。')
 
 
 def _candidate_stop_roots(data_root):
@@ -527,15 +527,22 @@ def stop_instance(data_root, port=PORT, timeout=STOP_TIMEOUT, *, scan_users=Fals
 def activate_existing_window(pid, quiet=False):
     user32 = ctypes.windll.user32
     user32.FindWindowW.restype = wintypes.HWND
-    hwnd = wintypes.HWND(user32.FindWindowW(None, WINDOW_TITLE))
+    user32.FindWindowExW.restype = wintypes.HWND
     owner = wintypes.DWORD()
-    if isinstance(pid, int) and pid > 0 and hwnd and user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner)) and owner.value == pid:
-        if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-        if user32.SetForegroundWindow(hwnd):
-            return
+    if isinstance(pid, int) and pid > 0:
+        for title in (WINDOW_TITLE, WINDOW_TITLE + ' 2.0.2', WINDOW_TITLE + ' 2.0'):
+            hwnd = wintypes.HWND(user32.FindWindowW(None, title))
+            while hwnd:
+                if user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner)) and owner.value == pid:
+                    if user32.IsIconic(hwnd):
+                        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    if user32.SetForegroundWindow(hwnd):
+                        return
+                    break
+                # A 1.x window can have the same title. Continue with the next top-level match.
+                hwnd = wintypes.HWND(user32.FindWindowExW(None, hwnd, None, title))
     if not quiet:
-        user32.MessageBoxW(None, '电梯管理系统 2.0 已在运行。请切换到已打开的桌面窗口。', WINDOW_TITLE, 0x40)
+        user32.MessageBoxW(None, '电梯管理系统已在运行。请切换到已打开的桌面窗口。', WINDOW_TITLE, 0x40)
 
 
 def open_operator_window(program_root, url, stopped, data_root=None):
@@ -677,10 +684,10 @@ def run_server(program_root, data_root, port=PORT, app=None, quiet=False, progra
 def main(argv=None):
     parser = argparse.ArgumentParser(description=WINDOW_TITLE)
     actions = parser.add_mutually_exclusive_group()
-    actions.add_argument('--stop', action='store_true', help='安全停止本安装版 2.0 实例')
+    actions.add_argument('--stop', action='store_true', help='安全停止本安装版实例')
     actions.add_argument('--check', action='store_true', help='检查运行环境，不启动服务')
     actions.add_argument('--data-folder', action='store_true', help='打开当前用户的业务数据目录')
-    parser.add_argument('--all-users', action='store_true', help='安装维护时检查并停止本机各账户下的 2.0 实例')
+    parser.add_argument('--all-users', action='store_true', help='安装维护时检查并停止本机各账户下的本安装版实例')
     parser.add_argument('--quiet', action='store_true', help='失败时仅记录日志并返回非零退出码')
     args = parser.parse_args(argv)
     data_root = None
@@ -706,7 +713,7 @@ def main(argv=None):
         if args.stop:
             stop_instance(data_root)
             if not args.quiet and os.name == 'nt':
-                ctypes.windll.user32.MessageBoxW(None, '电梯管理系统 2.0 已停止。需要使用时请重新打开桌面图标。',
+                ctypes.windll.user32.MessageBoxW(None, '电梯管理系统已停止。需要使用时请重新打开桌面图标。',
                                                WINDOW_TITLE, 0x40)
         elif args.data_folder:
             os.startfile(str(data_root))

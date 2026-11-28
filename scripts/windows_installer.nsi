@@ -7,6 +7,7 @@ SetDatablockOptimize on
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
+!include "FileFunc.nsh"
 !include "x64.nsh"
 !include "WinVer.nsh"
 
@@ -17,15 +18,15 @@ SetDatablockOptimize on
   !error "Pass -DOUT_FILE=<installer.exe>"
 !endif
 !ifndef APP_VERSION
-  !define APP_VERSION "2.0.2"
+  !define APP_VERSION "2.0.3"
 !endif
 !ifndef PAYLOAD_KB
   !define PAYLOAD_KB 0
 !endif
 !define APP_ID "ChangfuliElevatorDesktop"
 !define LEGACY_APP_ID "ChangfuliElevatorLedger"
-!define APP_NAME "昌福里社区电梯管理系统 2.0"
-!define MENU_NAME "昌福里社区电梯管理系统 2.0"
+!define APP_NAME "昌福里社区电梯管理系统"
+!define MENU_NAME "昌福里社区电梯管理系统"
 !define ICON_FILE "desktop-app-2.0.ico"
 !define PNG_ICON_FILE "desktop-app-2.0.png"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
@@ -44,16 +45,16 @@ VIProductVersion "${APP_VERSION}.0"
 VIAddVersionKey /LANG=2052 "ProductName" "${APP_NAME}"
 VIAddVersionKey /LANG=2052 "ProductVersion" "${APP_VERSION}"
 VIAddVersionKey /LANG=2052 "FileVersion" "${APP_VERSION}"
-VIAddVersionKey /LANG=2052 "FileDescription" "昌福里社区电梯管理系统 ${APP_VERSION} 安装程序"
+VIAddVersionKey /LANG=2052 "FileDescription" "${APP_NAME}安装程序"
 VIAddVersionKey /LANG=2052 "LegalCopyright" "昌福里社区27区党群物业服务站"
 
 !define MUI_ABORTWARNING
 !define MUI_CUSTOMFUNCTION_ABORT InstallerAbort
 !define MUI_CUSTOMFUNCTION_UNABORT un.InstallerAbort
-!define MUI_WELCOMEPAGE_TEXT "本向导将在本机安装“昌福里社区电梯管理系统 2.0”（独立 2.0 桌面版，不覆盖 1.x 旧版程序、快捷方式或数据）。$\r$\n$\r$\n下一步可自行选择程序安装目录。台账数据库、现场照片、导出文稿、备份及 WebView2 缓存统一保存在当前登录用户的本地数据目录（%LOCALAPPDATA%\${APP_ID}），与程序目录分离，升级和卸载均保留业务资料。$\r$\n$\r$\n安装需要管理员授权，日常使用无需管理员权限。"
-!define MUI_DIRECTORYPAGE_TEXT_TOP "请选择“昌福里社区电梯管理系统 2.0”的程序安装文件夹。程序文件仅写入下方所选目录；台账数据库与附件资料会在用户启动应用时保存在 %LOCALAPPDATA%\${APP_ID}，不会写入程序目录。"
-!define MUI_FINISHPAGE_TEXT "“昌福里社区电梯管理系统 2.0”已安装完成。$\r$\n$\r$\n请以日常使用的普通用户身份双击桌面“昌福里社区电梯管理系统 2.0”，打开桌面窗口后即可直接进入免登录工作台。若本机存有 1.x 旧版台账，首次启动会在当前用户数据目录安全复制旧台账，且不改动旧版目录。$\r$\n$\r$\n关闭主机桌面窗口会停止服务（端口 8766）；局域网访问期间请保持窗口打开。打开数据目录、停止系统与卸载入口位于开始菜单“昌福里社区电梯管理系统 2.0”。"
-!define MUI_UNCONFIRMPAGE_TEXT_TOP "卸载将停止本机正在运行的 2.0 服务，并仅移除当前 2.0 安装目录中的程序文件、快捷方式及 8766 防火墙规则。用户数据目录（%LOCALAPPDATA%\${APP_ID}）中的台账、附件、备份以及旧版 1.x 目录均会完整保留。"
+!define MUI_WELCOMEPAGE_TEXT "本向导将在本机安装“${APP_NAME}”（独立桌面版，保留 1.x 旧版程序和数据）。$\r$\n$\r$\n下一步可自行选择程序安装目录。台账数据库、现场照片、导出文稿、备份及 WebView2 缓存统一保存在当前登录用户的本地数据目录（%LOCALAPPDATA%\${APP_ID}），与程序目录分离，升级和卸载均保留业务资料。$\r$\n$\r$\n安装需要管理员授权，日常使用无需管理员权限。"
+!define MUI_DIRECTORYPAGE_TEXT_TOP "请选择“${APP_NAME}”的程序安装文件夹。程序文件仅写入下方所选目录；台账数据库与附件资料会在用户启动应用时保存在 %LOCALAPPDATA%\${APP_ID}，不会写入程序目录。"
+!define MUI_FINISHPAGE_TEXT "“${APP_NAME}”已安装完成。$\r$\n$\r$\n请以日常使用的普通用户身份双击桌面“${APP_NAME}”，打开桌面窗口后即可直接进入免登录工作台。若本机存有 1.x 旧版台账，首次启动会在当前用户数据目录安全复制旧台账，且不改动旧版目录。$\r$\n$\r$\n关闭主机桌面窗口会停止服务（端口 8766）；局域网访问期间请保持窗口打开。打开数据目录、停止系统与卸载入口位于开始菜单“${MENU_NAME}”。"
+!define MUI_UNCONFIRMPAGE_TEXT_TOP "卸载将停止本机正在运行的服务，并仅移除当前安装目录中的程序文件、快捷方式及 8766 防火墙规则。用户数据目录（%LOCALAPPDATA%\${APP_ID}）中的台账、附件、备份以及旧版 1.x 目录均会完整保留。"
 
 !insertmacro MUI_PAGE_WELCOME
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE ValidateInstallDirPage
@@ -128,7 +129,7 @@ Function ${PREFIX}AcquireInstallerMutex
   ${EndIf}
   ${If} $1 == 183
     System::Call 'kernel32::CloseHandle(p r0)'
-    MessageBox MB_OK|MB_ICONSTOP "另一份本产品 2.0 安装或卸载程序正在运行。请先完成并关闭该窗口，再重试。" /SD IDOK
+    MessageBox MB_OK|MB_ICONSTOP "另一份本产品的安装或卸载程序正在运行。请先完成并关闭该窗口，再重试。" /SD IDOK
     SetErrorLevel 8
     Quit
   ${EndIf}
@@ -169,7 +170,7 @@ Function ${PREFIX}CheckInstDirSafe
   ${EndIf}
   ${If} "$INSTDIR" == "$PROGRAMFILES64\${LEGACY_APP_ID}"
   ${OrIf} "$INSTDIR" == "$APPDATA\${LEGACY_APP_ID}"
-    Push "不能覆盖 1.x 旧版目录（${LEGACY_APP_ID}），请为 2.0 选择独立的安装文件夹。"
+    Push "不能覆盖 1.x 旧版目录（${LEGACY_APP_ID}），请选择独立的安装文件夹。"
     Return
   ${EndIf}
   ${If} "$INSTDIR" == "$APPDATA\${APP_ID}"
@@ -224,12 +225,12 @@ Function ValidateInstallDirPage
 FunctionEnd
 
 Function StopCandidate
-  DetailPrint "正在安全停止本机电梯管理系统 2.0…"
+  DetailPrint "正在安全停止本机电梯管理系统…"
   nsExec::ExecToStack /TIMEOUT=60000 '"$PLUGINSDIR\payload\runtime\python.exe" "$PLUGINSDIR\payload\scripts\windows_launcher.py" --stop --all-users --quiet'
   Pop $0
   Pop $1
   ${If} $0 != "0"
-    MessageBox MB_OK|MB_ICONSTOP "无法安全停止正在运行的 2.0 实例，安装未覆盖程序。请等待工作人员保存并关闭 2.0 桌面窗口，或重启主机后重试。$\r$\n返回码：$0$\r$\n$1" /SD IDOK
+    MessageBox MB_OK|MB_ICONSTOP "无法安全停止正在运行的实例，安装未覆盖程序。请等待工作人员保存并关闭桌面窗口，或重启主机后重试。$\r$\n返回码：$0$\r$\n$1" /SD IDOK
     SetErrorLevel 2
     Abort
   ${EndIf}
@@ -242,16 +243,16 @@ Function ${PREFIX}StopInstalled
   stop_check_runtime:
     IfFileExists "$INSTDIR\runtime\python.exe" stop_run stop_damaged
   stop_run:
-    DetailPrint "正在停止本机电梯管理系统 2.0…"
+    DetailPrint "正在停止本机电梯管理系统…"
     nsExec::ExecToStack /TIMEOUT=60000 '"$INSTDIR\runtime\python.exe" "$INSTDIR\scripts\windows_launcher.py" --stop --all-users --quiet'
     Pop $0
     Pop $1
     StrCmp $0 "0" stop_done
-    MessageBox MB_OK|MB_ICONSTOP "无法安全停止正在运行的 2.0 实例，操作已取消，程序和用户台账未被改动。$\r$\n请先关闭 2.0 桌面窗口后重试。$\r$\n返回码：$0$\r$\n$1" /SD IDOK
+    MessageBox MB_OK|MB_ICONSTOP "无法安全停止正在运行的实例，操作已取消，程序和用户台账未被改动。$\r$\n请先关闭桌面窗口后重试。$\r$\n返回码：$0$\r$\n$1" /SD IDOK
     SetErrorLevel 2
     Abort
   stop_damaged:
-    MessageBox MB_OK|MB_ICONSTOP "现有 2.0 程序的启动器或内置运行环境不完整，无法确认实例已经停止。请联系维护人员修复后重试；用户数据目录保持不变。" /SD IDOK
+    MessageBox MB_OK|MB_ICONSTOP "现有程序的启动器或内置运行环境不完整，无法确认实例已经停止。请联系维护人员修复后重试；用户数据目录保持不变。" /SD IDOK
     SetErrorLevel 2
     Abort
   stop_done:
@@ -371,6 +372,26 @@ FunctionEnd
   Delete "$INSTDIR\${PNG_ICON_FILE}"
 !macroend
 
+!macro RemoveShortcuts SUFFIX
+  IfFileExists "$DESKTOP\${APP_NAME}${SUFFIX}.lnk" 0 +2
+  Delete "$DESKTOP\${APP_NAME}${SUFFIX}.lnk"
+  IfFileExists "$SMPROGRAMS\${MENU_NAME}${SUFFIX}\启动电梯管理系统${SUFFIX}.lnk" 0 +2
+  Delete "$SMPROGRAMS\${MENU_NAME}${SUFFIX}\启动电梯管理系统${SUFFIX}.lnk"
+  IfFileExists "$SMPROGRAMS\${MENU_NAME}${SUFFIX}\停止电梯管理系统${SUFFIX}.lnk" 0 +2
+  Delete "$SMPROGRAMS\${MENU_NAME}${SUFFIX}\停止电梯管理系统${SUFFIX}.lnk"
+  IfFileExists "$SMPROGRAMS\${MENU_NAME}${SUFFIX}\打开数据目录${SUFFIX}.lnk" 0 +2
+  Delete "$SMPROGRAMS\${MENU_NAME}${SUFFIX}\打开数据目录${SUFFIX}.lnk"
+  IfFileExists "$SMPROGRAMS\${MENU_NAME}${SUFFIX}\卸载电梯管理系统${SUFFIX}.lnk" 0 +2
+  Delete "$SMPROGRAMS\${MENU_NAME}${SUFFIX}\卸载电梯管理系统${SUFFIX}.lnk"
+  ${IfNot} ${Errors}
+    ${DirState} "$SMPROGRAMS\${MENU_NAME}${SUFFIX}" $0
+    ClearErrors
+    ${If} $0 == 0
+      RMDir "$SMPROGRAMS\${MENU_NAME}${SUFFIX}"
+    ${EndIf}
+  ${EndIf}
+!macroend
+
 Section "安装主程序" SEC_MAIN
   Call ValidateInstDir
   InitPluginsDir
@@ -391,7 +412,7 @@ Section "安装主程序" SEC_MAIN
   ClearErrors
   !insertmacro RemoveProgramFiles
   ${If} ${Errors}
-    MessageBox MB_OK|MB_ICONSTOP "目标目录中的 2.0 程序文件仍被占用，安装已停止。请关闭窗口或重启主机后重试。用户台账数据未被删除。" /SD IDOK
+    MessageBox MB_OK|MB_ICONSTOP "目标目录中的程序文件仍被占用，安装已停止。请关闭窗口或重启主机后重试。用户台账数据未被删除。" /SD IDOK
     SetErrorLevel 4
     Abort
   ${EndIf}
@@ -426,13 +447,15 @@ Section "安装主程序" SEC_MAIN
   ${EndIf}
 
   ClearErrors
+  !insertmacro RemoveShortcuts " 2.0"
+  !insertmacro RemoveShortcuts ""
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   CreateDirectory "$SMPROGRAMS\${MENU_NAME}"
   CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\runtime\pythonw.exe" '$\"$INSTDIR\scripts\windows_launcher.py$\"' "$INSTDIR\${ICON_FILE}"
-  CreateShortcut "$SMPROGRAMS\${MENU_NAME}\启动电梯管理系统 2.0.lnk" "$INSTDIR\runtime\pythonw.exe" '$\"$INSTDIR\scripts\windows_launcher.py$\"' "$INSTDIR\${ICON_FILE}"
-  CreateShortcut "$SMPROGRAMS\${MENU_NAME}\停止电梯管理系统 2.0.lnk" "$INSTDIR\runtime\pythonw.exe" '$\"$INSTDIR\scripts\windows_launcher.py$\" --stop' "$INSTDIR\${ICON_FILE}"
-  CreateShortcut "$SMPROGRAMS\${MENU_NAME}\打开数据目录 2.0.lnk" "$INSTDIR\runtime\pythonw.exe" '$\"$INSTDIR\scripts\windows_launcher.py$\" --data-folder' "$INSTDIR\${ICON_FILE}"
-  CreateShortcut "$SMPROGRAMS\${MENU_NAME}\卸载电梯管理系统 2.0.lnk" "$INSTDIR\Uninstall.exe" "" "$INSTDIR\${ICON_FILE}"
+  CreateShortcut "$SMPROGRAMS\${MENU_NAME}\启动电梯管理系统.lnk" "$INSTDIR\runtime\pythonw.exe" '$\"$INSTDIR\scripts\windows_launcher.py$\"' "$INSTDIR\${ICON_FILE}"
+  CreateShortcut "$SMPROGRAMS\${MENU_NAME}\停止电梯管理系统.lnk" "$INSTDIR\runtime\pythonw.exe" '$\"$INSTDIR\scripts\windows_launcher.py$\" --stop' "$INSTDIR\${ICON_FILE}"
+  CreateShortcut "$SMPROGRAMS\${MENU_NAME}\打开数据目录.lnk" "$INSTDIR\runtime\pythonw.exe" '$\"$INSTDIR\scripts\windows_launcher.py$\" --data-folder' "$INSTDIR\${ICON_FILE}"
+  CreateShortcut "$SMPROGRAMS\${MENU_NAME}\卸载电梯管理系统.lnk" "$INSTDIR\Uninstall.exe" "" "$INSTDIR\${ICON_FILE}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "${APP_NAME}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "${APP_VERSION}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "Publisher" "昌福里社区27区党群物业服务站"
@@ -464,13 +487,13 @@ Function un.onInit
   ReadRegStr $0 HKLM "${UNINSTALL_KEY}" "InstallLocation"
   ${If} $0 == ""
   ${OrIf} "$INSTDIR" != "$0"
-    MessageBox MB_OK|MB_ICONSTOP "卸载器位置与已登记的 2.0 程序安装目录不一致，已停止操作。请从 Windows“已安装的应用”中卸载“${APP_NAME}”。" /SD IDOK
+    MessageBox MB_OK|MB_ICONSTOP "卸载器位置与已登记的程序安装目录不一致，已停止操作。请从 Windows“已安装的应用”中卸载“${APP_NAME}”。" /SD IDOK
     SetErrorLevel 2
     Quit
   ${EndIf}
   ${If} "$INSTDIR" == "$PROGRAMFILES64\${LEGACY_APP_ID}"
   ${OrIf} "$INSTDIR" == "$APPDATA\${LEGACY_APP_ID}"
-    MessageBox MB_OK|MB_ICONSTOP "检测到旧版 1.x 目录路径，2.0 卸载器不会改动旧版文件，操作已停止。" /SD IDOK
+    MessageBox MB_OK|MB_ICONSTOP "检测到旧版 1.x 目录路径，卸载器不会改动旧版文件，操作已停止。" /SD IDOK
     SetErrorLevel 2
     Quit
   ${EndIf}
@@ -485,14 +508,10 @@ Section "Uninstall"
   SetOutPath "$TEMP"
   ClearErrors
   !insertmacro RemoveProgramFiles
-  Delete "$DESKTOP\${APP_NAME}.lnk"
-  Delete "$SMPROGRAMS\${MENU_NAME}\启动电梯管理系统 2.0.lnk"
-  Delete "$SMPROGRAMS\${MENU_NAME}\停止电梯管理系统 2.0.lnk"
-  Delete "$SMPROGRAMS\${MENU_NAME}\打开数据目录 2.0.lnk"
-  Delete "$SMPROGRAMS\${MENU_NAME}\卸载电梯管理系统 2.0.lnk"
-  RMDir "$SMPROGRAMS\${MENU_NAME}"
+  !insertmacro RemoveShortcuts " 2.0"
+  !insertmacro RemoveShortcuts ""
   ${If} ${Errors}
-    MessageBox MB_OK|MB_ICONSTOP "部分 2.0 程序文件无法删除，卸载未完成。请重启主机后重试。用户本地数据目录中的台账资料仍保留。" /SD IDOK
+    MessageBox MB_OK|MB_ICONSTOP "部分程序文件无法删除，卸载未完成。请重启主机后重试。用户本地数据目录中的台账资料仍保留。" /SD IDOK
     SetErrorLevel 4
     Abort
   ${EndIf}

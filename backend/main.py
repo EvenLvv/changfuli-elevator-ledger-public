@@ -44,7 +44,7 @@ async def lifespan(app):
 
 logging.basicConfig(filename=LOGS / "system.log", level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s", encoding="utf-8")
-app = FastAPI(title=COMMUNITY + "电梯管理台账", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="昌福里社区电梯管理系统", version="2.0.3", docs_url=None, redoc_url=None, lifespan=lifespan)
 TYPES = {"日常维保", "故障", "维修", "配件更换", "检验/检查", "资料补充", "其他"}
 STATUSES = {"正常", "故障", "维修中", "停梯", "待处理"}
 CATEGORIES = {"工作现场照片", "维修记录", "维保记录", "报价单", "业主签字单", "检测报告", "验收资料", "其他"}

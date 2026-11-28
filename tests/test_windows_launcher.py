@@ -70,8 +70,8 @@ async def app(scope, receive, send):
         self.assertEqual(launcher.APP_ID, 'ChangfuliElevatorDesktop')
         self.assertNotEqual(launcher.APP_ID, 'ChangfuliElevatorLedger')
         self.assertEqual(launcher.PORT, 8766)
-        self.assertEqual(launcher.APP_VERSION, '2.0.2')
-        self.assertEqual(launcher.WINDOW_TITLE, '昌福里社区电梯管理系统 2.0.2')
+        self.assertEqual(launcher.APP_VERSION, '2.0.3')
+        self.assertEqual(launcher.WINDOW_TITLE, '昌福里社区电梯管理系统')
         self.assertNotEqual(launcher.LOCK_FILE, 'runtime-instance.lock')
         self.assertNotEqual(launcher.STATE_FILE, 'runtime-instance.json')
 
@@ -241,7 +241,7 @@ async def app(scope, receive, send):
         status, identity = request(launcher.IDENTITY_PATH, 'GET', headers=[(b'x-launcher-challenge', challenge.encode())])
         self.assertEqual(status, 200)
         self.assertEqual(identity['app'], 'ChangfuliElevatorDesktop')
-        self.assertEqual(identity['version'], '2.0.2')
+        self.assertEqual(identity['version'], '2.0.3')
         self.assertEqual(identity['proof'], launcher.signature(secret, challenge))
         self.assertNotIn(secret, json.dumps(identity))
 
@@ -564,7 +564,7 @@ async def app(scope, receive, send):
             self.assertEqual(launcher.main(['--stop']), 0)
             stop.assert_called_once_with(self.data)
             windll.user32.MessageBoxW.assert_called_once_with(
-                None, '电梯管理系统 2.0 已停止。需要使用时请重新打开桌面图标。', launcher.WINDOW_TITLE, 0x40
+                None, '电梯管理系统已停止。需要使用时请重新打开桌面图标。', launcher.WINDOW_TITLE, 0x40
             )
             windll.user32.MessageBoxW.reset_mock()
             self.assertEqual(launcher.main(['--stop', '--quiet']), 0)
@@ -574,34 +574,47 @@ async def app(scope, receive, send):
         with patch.object(launcher.ctypes, 'windll', create=True) as windll, patch('webbrowser.open') as browser:
             api = windll.user32
 
-            def find_window(cls, title):
-                # Simulate an old 1.x window still open alongside our 2.0 window.
-                if title == '昌福里社区电梯管理系统':
-                    raise AssertionError('Must never query the 1.x window title')
-                return 123 if title == '昌福里社区电梯管理系统 2.0.2' else 0
-
-            api.FindWindowW.side_effect = find_window
+            # The first clean-titled window belongs to 1.x, the second to the verified process.
+            api.FindWindowW.side_effect = lambda cls, title: 123 if title == launcher.WINDOW_TITLE else 0
+            api.FindWindowExW.side_effect = lambda parent, previous, cls, title: 456 if previous.value == 123 else 0
 
             def get_owner(hwnd, owner):
-                owner._obj.value = 45
+                owner._obj.value = {123: 12, 456: 45}[hwnd.value]
                 return 1
 
             api.GetWindowThreadProcessId.side_effect = get_owner
             launcher.activate_existing_window(45)
-            api.FindWindowW.assert_called_once_with(None, '昌福里社区电梯管理系统 2.0.2')
-            api.ShowWindow.assert_called_once()
-            api.SetForegroundWindow.assert_called_once()
+            api.FindWindowW.assert_called_once_with(None, '昌福里社区电梯管理系统')
+            self.assertEqual(api.ShowWindow.call_args.args[0].value, 456)
+            self.assertEqual(api.SetForegroundWindow.call_args.args[0].value, 456)
             api.MessageBoxW.assert_not_called()
             api.SetForegroundWindow.reset_mock()
+            api.ShowWindow.reset_mock()
 
             launcher.activate_existing_window(67)
+            api.ShowWindow.assert_not_called()
             api.SetForegroundWindow.assert_not_called()
-            self.assertIn('2.0 已在运行', api.MessageBoxW.call_args.args[1])
+            self.assertIn('电梯管理系统已在运行', api.MessageBoxW.call_args.args[1])
             api.MessageBoxW.reset_mock()
             api.SetForegroundWindow.return_value = 0
             launcher.activate_existing_window(45)
             api.MessageBoxW.assert_called_once()
             browser.assert_not_called()
+
+    def test_repeat_launch_finds_verified_window_with_previous_title(self):
+        for suffix in (' 2.0.2', ' 2.0'):
+            with self.subTest(suffix=suffix), patch.object(launcher.ctypes, 'windll', create=True) as windll:
+                api = windll.user32
+                api.FindWindowW.side_effect = lambda cls, title: 456 if title == launcher.WINDOW_TITLE + suffix else 0
+
+                def get_owner(hwnd, owner):
+                    owner._obj.value = 45
+                    return 1
+
+                api.GetWindowThreadProcessId.side_effect = get_owner
+                launcher.activate_existing_window(45)
+                self.assertEqual(api.SetForegroundWindow.call_args.args[0].value, 456)
+                api.MessageBoxW.assert_not_called()
 
     def test_desktop_window_settings_stop_and_webview2_failures(self):
         class Event:
@@ -652,7 +665,7 @@ async def app(scope, receive, send):
                     self.assertEqual(os.environ['WEBVIEW2_USER_DATA_FOLDER'], expected_wv2)
                     self.assertEqual(gui.start.call_args.kwargs['storage_path'], expected_wv2)
                 gui.create_window.assert_called_once_with(
-                    '昌福里社区电梯管理系统 2.0.2', 'http://127.0.0.1:8766',
+                    '昌福里社区电梯管理系统', 'http://127.0.0.1:8766',
                     width=1440, height=900, maximized=True, text_select=True,
                 )
                 self.assertEqual(gui.start.call_args.kwargs['gui'], 'edgechromium')

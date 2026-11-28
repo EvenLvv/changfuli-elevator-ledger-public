@@ -76,7 +76,7 @@ class WindowsInstallerTest(unittest.TestCase):
         runtime.write_bytes(b'untrusted input')
         output = self.root / 'output'; output.mkdir()
         with self.assertRaisesRegex(ValueError, 'SHA256'):
-            builder.stage_application(runtime, self.root, output, '2.0.2')
+            builder.stage_application(runtime, self.root, output, '2.0.3')
         self.assertEqual(list(output.iterdir()), [])
         source = self.root / 'outside.txt'; source.write_text('must not be copied')
         link = self.root / 'link.txt'
@@ -125,7 +125,7 @@ class WindowsInstallerTest(unittest.TestCase):
             (packages / 'demo.py').write_text('VALUE=1', encoding='utf-8')
 
         with patch.object(builder, 'ROOT', source), patch.object(builder, 'PYTHON_SHA256', builder.sha256(python_zip)), patch.object(builder.subprocess, 'run', install):
-            stage = builder.stage_application(python_zip, self.root, output, '2.0.2')
+            stage = builder.stage_application(python_zip, self.root, output, '2.0.3')
             self.assertEqual((stage / 'runtime/python312._pth').read_text(), builder.PTH_CONTENT)
             self.assertFalse((stage / 'data').exists())
             self.assertFalse((stage / 'seed').exists())
@@ -136,7 +136,7 @@ class WindowsInstallerTest(unittest.TestCase):
             self.assertTrue((stage / builder.APP_ICON_PNG).is_file())
             manifest = json.loads((stage / 'BUILD-MANIFEST.json').read_text())
             self.assertEqual(manifest['product'], 'ChangfuliElevatorDesktop')
-            self.assertEqual(manifest['version'], '2.0.2')
+            self.assertEqual(manifest['version'], '2.0.3')
             self.assertNotIn('seed/official-ledger.xlsx', manifest['files'])
             for name, digest in manifest['files'].items():
                 self.assertEqual(builder.sha256(stage / name), digest)
@@ -146,7 +146,7 @@ class WindowsInstallerTest(unittest.TestCase):
             unrequested_seed = source / 'seed/official-ledger.xlsx'
             unrequested_seed.parent.mkdir(parents=True, exist_ok=True)
             unrequested_seed.write_bytes(b'do not stage by default')
-            stage = builder.stage_application(python_zip, self.root, output, '2.0.2')
+            stage = builder.stage_application(python_zip, self.root, output, '2.0.3')
             self.assertFalse((stage / 'seed').exists())
             self.assertFalse(list(stage.rglob('*.xlsx')))
             # Unrequested .xlsx inside a copied directory tree must also be rejected on default empty build.
@@ -154,24 +154,24 @@ class WindowsInstallerTest(unittest.TestCase):
             stray_xlsx.write_bytes(b'unwanted')
             try:
                 with self.assertRaisesRegex(ValueError, 'unwanted.xlsx'):
-                    builder.stage_application(python_zip, self.root, output, '2.0.2')
+                    builder.stage_application(python_zip, self.root, output, '2.0.3')
             finally:
                 stray_xlsx.unlink()
             fixture = ROOT / 'tests/fixtures/synthetic-ledger-fixture.xlsx'
-            stage = builder.stage_application(python_zip, self.root, output, '2.0.2', seed_ledger=fixture)
+            stage = builder.stage_application(python_zip, self.root, output, '2.0.3', seed_ledger=fixture)
             manifest = json.loads((stage / 'BUILD-MANIFEST.json').read_text())
             self.assertEqual(manifest['files']['seed/official-ledger.xlsx'], builder.sha256(fixture))
             self.assertEqual((stage / 'seed/official-ledger.xlsx').read_bytes(), fixture.read_bytes())
             # Subsequent default empty stage must wipe any prior stage/seed/official-ledger.xlsx.
-            stage = builder.stage_application(python_zip, self.root, output, '2.0.2')
+            stage = builder.stage_application(python_zip, self.root, output, '2.0.3')
             self.assertFalse((stage / 'seed').exists())
             self.assertFalse(list(stage.rglob('*.xlsx')))
             (stage / 'BUILD-MANIFEST.json').unlink()
             with self.assertRaises(ValueError):
-                builder.stage_application(python_zip, self.root, output, '2.0.2')
+                builder.stage_application(python_zip, self.root, output, '2.0.3')
             self.assertTrue((stage / 'backend/main.py').is_file())
 
-    def test_brand_icons_are_rebuilt_from_first_version_white_27_ico_and_versions_are_2_0_2(self):
+    def test_brand_icons_are_rebuilt_from_first_version_white_27_ico_and_versions_are_2_0_3(self):
         source_ico_path = ROOT / 'scripts/windows-app.ico'
         ico_path = ROOT / 'scripts/desktop-app-2.0.ico'
         png_path = ROOT / 'scripts/desktop-app-2.0.png'
@@ -237,22 +237,26 @@ class WindowsInstallerTest(unittest.TestCase):
 
         index_html = (ROOT / 'frontend/index.html').read_text(encoding='utf-8')
         self.assertIn('/src/assets/desktop-app-2.0.png', index_html)
-        self.assertIn('昌福里社区电梯管理系统 2.0.2', index_html)
-        self.assertNotIn('2.0.1', index_html)
+        self.assertIn('<title>昌福里社区电梯管理系统</title>', index_html)
+        self.assertNotIn('2.0.2', index_html)
 
         package_json = json.loads((ROOT / 'frontend/package.json').read_text(encoding='utf-8'))
-        self.assertEqual(package_json['version'], '2.0.2')
+        self.assertEqual(package_json['version'], '2.0.3')
+
+        lock = json.loads((ROOT / 'frontend/package-lock.json').read_text(encoding='utf-8'))
+        self.assertEqual(lock['version'], package_json['version'])
+        self.assertEqual(lock['packages']['']['version'], package_json['version'])
 
         app_vue = (ROOT / 'frontend/src/App.vue').read_text(encoding='utf-8')
         self.assertIn("./assets/elevator-lobby.jpg", app_vue)
         self.assertNotIn('architecture.svg', app_vue)
-        self.assertIn('打开即可使用 · 无需登录 · 2.0.2', app_vue)
-        self.assertIn('本机与局域网 · 版本 2.0.2', app_vue)
-        self.assertIn('一梯一档 · 2.0.2', app_vue)
-        self.assertNotIn('2.0.1', app_vue)
+        self.assertIn('打开即可使用 · 无需登录 · 2.0.3', app_vue)
+        self.assertIn('本机与局域网 · 版本 2.0.3', app_vue)
+        self.assertIn('一梯一档 · 2.0.3', app_vue)
+        self.assertNotIn('2.0.2', app_vue)
 
-        self.assertIn('2.0.2', (ROOT / 'scripts/run.py').read_text(encoding='utf-8'))
-        self.assertIn('2.0.2', (ROOT / 'scripts/package_release.py').read_text(encoding='utf-8'))
+        self.assertIn('2.0.3', (ROOT / 'scripts/run.py').read_text(encoding='utf-8'))
+        self.assertIn('2.0.3', (ROOT / 'scripts/package_release.py').read_text(encoding='utf-8'))
 
     def test_nsis_directory_page_honors_user_choice_and_separates_2_0_identity(self):
         text = (ROOT / 'scripts/windows_installer.nsi').read_text(encoding='utf-8')
@@ -282,28 +286,18 @@ class WindowsInstallerTest(unittest.TestCase):
         sections_body = '\n'.join(uncommented[sec_idx:])
         self.assertNotIn('StrCpy $INSTDIR', sections_body)
 
-        # 2.0 identity, port 8766, distinct shortcuts, and no elevated LocalAppData DB creation.
+        # 2.x identity, port 8766, clean display names, and no elevated LocalAppData DB creation.
         self.assertIn('!define APP_ID "ChangfuliElevatorDesktop"', uncommented)
-        self.assertIn('!define APP_VERSION "2.0.2"', uncommented)
+        self.assertIn('!define APP_VERSION "2.0.3"', uncommented)
         self.assertIn('!define FIREWALL_RULE "ChangfuliElevatorDesktop.PrivateLAN.8766"', uncommented)
         self.assertIn('localport=8766 program="$INSTDIR\\runtime\\pythonw.exe"', text)
         self.assertIn('Icon "${ICON_FILE}"', uncommented)
         self.assertNotIn('windows-app.ico', text)
-        self.assertIn('CreateShortcut "$DESKTOP\\${APP_NAME}.lnk"', text)
-        for shortcut in (
-            '启动电梯管理系统 2.0.lnk',
-            '停止电梯管理系统 2.0.lnk',
-            '打开数据目录 2.0.lnk',
-            '卸载电梯管理系统 2.0.lnk',
-        ):
-            self.assertIn(shortcut, text)
-        for old_shortcut in (
-            '启动电梯管理系统.lnk',
-            '停止电梯管理系统.lnk',
-            '打开数据目录.lnk',
-            '卸载电梯管理系统.lnk',
-        ):
-            self.assertNotIn(old_shortcut, text)
+        self.assertIn('!define APP_NAME "昌福里社区电梯管理系统"', uncommented)
+        self.assertIn('!define MENU_NAME "昌福里社区电梯管理系统"', uncommented)
+        for line in uncommented:
+            if line.startswith(('!define MUI_', 'DetailPrint ', 'MessageBox ')):
+                self.assertNotIn('2.0', line)
         self.assertNotIn('CreateDirectory "$LOCALAPPDATA', text)
         self.assertNotIn('CreateDirectory "$APPDATA', text)
         self.assertNotIn('elevator.db', text)
@@ -324,6 +318,31 @@ class WindowsInstallerTest(unittest.TestCase):
         self.assertNotIn('Delete "', maintenance)
 
     @unittest.skipUnless(shutil.which('makensis'), 'NSIS is not installed on this host')
+    def test_compiled_shortcut_paths_and_upgrade_cleanup_order(self):
+        (self.root / 'fixture.txt').touch()
+        charset = ['-OUTPUTCHARSET', 'UTF8'] if sys.platform == 'win32' else []
+        script = subprocess.check_output([
+            'makensis', '-PPO', *charset, f'-DSTAGE_DIR={self.root}',
+            f'-DOUT_FILE={self.root}/fixture.exe', str(ROOT / 'scripts/windows_installer.nsi'),
+        ], encoding='utf-8-sig')
+        self.assertIn('VIProductVersion "2.0.3.0"', script)
+        install = script.split('Section "安装主程序" SEC_MAIN', 1)[1].split('SectionEnd', 1)[0]
+        uninstall = script.split('Section "Uninstall"', 1)[1].split('SectionEnd', 1)[0]
+        before_create = install[:install.index('CreateShortcut ')]
+        product = '昌福里社区电梯管理系统'
+        for suffix in ('', ' 2.0'):
+            menu = rf'$SMPROGRAMS\{product}{suffix}'
+            paths = [rf'$DESKTOP\{product}{suffix}.lnk']
+            paths += [rf'{menu}\{action}{suffix}.lnk' for action in
+                      ('启动电梯管理系统', '停止电梯管理系统', '打开数据目录', '卸载电梯管理系统')]
+            for section in (before_create, uninstall):
+                remove_folder = section.index(f'RMDir "{menu}"')
+                for path in paths:
+                    self.assertIn(f'Delete "{path}"', section[:remove_folder])
+            if not suffix:
+                self.assertCountEqual(re.findall(r'^CreateShortcut "([^"]+)"', install, re.M), paths)
+
+    @unittest.skipUnless(shutil.which('makensis'), 'NSIS is not installed on this host')
     def test_nsis_compiles_and_has_narrow_data_safe_removal(self):
         source = ROOT / 'scripts/windows_installer.nsi'
         text = source.read_text(encoding='utf-8')
@@ -341,7 +360,7 @@ class WindowsInstallerTest(unittest.TestCase):
         subprocess.run([shutil.which('makensis'), '-V2', f'-DSTAGE_DIR={stage}', f'-DOUT_FILE={target}', str(source)], check=True)
         self.assertEqual(target.read_bytes()[:2], b'MZ')
 
-        # Also run default build_windows_installer.py CLI flow without --seed-ledger and verify empty stage + 2.0.2 exe.
+        # Also run default build_windows_installer.py CLI flow without --seed-ledger and verify empty stage + 2.0.3 exe.
         project, output = self.root / 'default-project', self.root / 'default-output'
         project.mkdir(); output.mkdir()
         for rel, content in {
@@ -349,7 +368,7 @@ class WindowsInstallerTest(unittest.TestCase):
             'backend/__init__.py': '',
             'backend/main.py': 'VALUE = 1\n',
             'scripts/windows_launcher.py': 'pass\n',
-            'frontend/dist/index.html': '<!doctype html><title>昌福里社区电梯管理系统 2.0.2</title>',
+            'frontend/dist/index.html': '<!doctype html><title>昌福里社区电梯管理系统</title>',
             'docs/WINDOWS_INSTALLER.md': 'install docs',
             'USER_GUIDE.md': 'user guide',
         }.items():
@@ -385,7 +404,7 @@ class WindowsInstallerTest(unittest.TestCase):
                 patch.object(builder.subprocess, 'run', side_effect=run_pip_or_makensis), \
                 patch.object(sys, 'argv', argv):
             builder.main()
-        built_exe = output / 'ChangfuliElevatorDesktop-Setup-2.0.2-x64.exe'
+        built_exe = output / 'ChangfuliElevatorDesktop-Setup-2.0.3-x64.exe'
         self.assertTrue(built_exe.is_file())
         self.assertEqual(built_exe.read_bytes()[:2], b'MZ')
         self.assertTrue(built_exe.with_suffix('.exe.sha256').is_file())
@@ -394,7 +413,7 @@ class WindowsInstallerTest(unittest.TestCase):
         self.assertFalse((staged / 'seed/official-ledger.xlsx').exists())
         self.assertEqual(list(staged.rglob('*.xlsx')), [])
         manifest = json.loads((staged / 'BUILD-MANIFEST.json').read_text(encoding='utf-8'))
-        self.assertEqual(manifest['version'], '2.0.2')
+        self.assertEqual(manifest['version'], '2.0.3')
         self.assertNotIn('seed/official-ledger.xlsx', manifest['files'])
 
 
