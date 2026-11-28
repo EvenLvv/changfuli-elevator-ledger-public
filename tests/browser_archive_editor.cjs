@@ -4,7 +4,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const base=process.env.ARCHIVE_EDITOR_TEST_URL;
 assert.ok(base,'Set ARCHIVE_EDITOR_TEST_URL to an isolated test server');
 const target=new URL(base);
-assert.ok(['127.0.0.1','localhost'].includes(target.hostname)&&target.port&&target.port!=='8765','Use an isolated loopback test port');
+assert.ok(['127.0.0.1','localhost'].includes(target.hostname)&&target.port&&!['8765','8766'].includes(target.port),'Use an isolated loopback test port');
 const out=process.env.AUDIT_OUTPUT||path.resolve('outputs/archive-editor-20261028/browser');
 
 (async()=>{

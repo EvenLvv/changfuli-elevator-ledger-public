@@ -2,10 +2,10 @@
 const {chromium,request}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
-const base=process.env.AUDIT_URL||'http://127.0.0.1:8766';
+const base=process.env.AUDIT_URL||'http://127.0.0.1:8767';
 const out=process.env.AUDIT_OUTPUT||'/private/tmp/elevator-style-qa';
 const endpoint=new URL(base);
-assert.ok(['127.0.0.1','[::1]','localhost'].includes(endpoint.hostname)&&endpoint.port!=='8765',
+assert.ok(['127.0.0.1','[::1]','localhost'].includes(endpoint.hostname)&&!['8765','8766'].includes(endpoint.port),
  'Browser regression requires a loopback URL on a non-production port');
 (async()=>{
  fs.mkdirSync(out,{recursive:true});

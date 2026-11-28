@@ -16,7 +16,9 @@ import tempfile
 from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_ID = 'ChangfuliElevatorLedger'
+APP_ID = 'ChangfuliElevatorDesktop'
+APP_ICON_ICO = 'desktop-app-2.0.ico'
+APP_ICON_PNG = 'desktop-app-2.0.png'
 PYTHON_VERSION = '3.12.10'
 PYTHON_SHA256 = '4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3'
 PTH_CONTENT = 'python312.zip\n.\nLib/site-packages\n..\nimport site\n'
@@ -128,7 +130,13 @@ def stage_application(python_zip, wheelhouse, output_dir, version, seed_ledger=N
         raise ValueError('The Python ZIP SHA256 does not match the official Python 3.12.10 x64 input')
     lock = ROOT / 'requirements.lock.txt'
     wheels = selected_wheels(wheelhouse, locked_requirements(lock))
-    for required in ('scripts/windows_launcher.py', 'frontend/dist/index.html', 'scripts/windows-app.ico', 'docs/WINDOWS_INSTALLER.md'):
+    for required in (
+        'scripts/windows_launcher.py',
+        'frontend/dist/index.html',
+        f'scripts/{APP_ICON_ICO}',
+        f'scripts/{APP_ICON_PNG}',
+        'docs/WINDOWS_INSTALLER.md',
+    ):
         if not (ROOT / required).is_file():
             raise ValueError(f'Build prerequisite missing: {required}')
     stage = Path(tempfile.mkdtemp(prefix='.stage-', dir=output_dir))
@@ -153,7 +161,8 @@ def stage_application(python_zip, wheelhouse, output_dir, version, seed_ledger=N
             copy_file(source, stage / 'backend' / source.name)
         copy_file(ROOT / 'scripts/windows_launcher.py', stage / 'scripts/windows_launcher.py')
         copy_tree(ROOT / 'frontend/dist', stage / 'frontend/dist')
-        copy_file(ROOT / 'scripts/windows-app.ico', stage / 'windows-app.ico')
+        copy_file(ROOT / f'scripts/{APP_ICON_ICO}', stage / APP_ICON_ICO)
+        copy_file(ROOT / f'scripts/{APP_ICON_PNG}', stage / APP_ICON_PNG)
         copy_file(lock, stage / 'requirements.lock.txt')
         copy_file(ROOT / 'docs/WINDOWS_INSTALLER.md', stage / 'docs/安装使用说明.txt')
         copy_file(ROOT / 'USER_GUIDE.md', stage / 'docs/USER_GUIDE.md')
@@ -189,7 +198,7 @@ def main():
     parser.add_argument('--python-zip', type=Path, required=True, help='Official python-3.12.10-embed-amd64.zip')
     parser.add_argument('--wheelhouse', type=Path, default=ROOT / 'wheelhouse')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'outputs/windows-installer')
-    parser.add_argument('--version', default='1.1.0')
+    parser.add_argument('--version', default='2.0.0')
     parser.add_argument('--seed-ledger', type=Path, help='Explicitly copy this private workbook into the installer stage')
     parser.add_argument('--makensis', default=shutil.which('makensis'))
     parser.add_argument('--stage-only', action='store_true')

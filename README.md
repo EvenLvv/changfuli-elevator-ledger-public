@@ -1,12 +1,12 @@
-# 昌福里社区27区党群物业服务站电梯管理台账 1.1.0
+# 昌福里社区27区党群物业服务站电梯管理台账 2.0.0
 
 供物业站在一台 Windows 10 / 11 主机上运行，其他电脑或手机通过同一局域网的浏览器访问。记录一梯一档、维保故障维修和配件更换，集中保存照片附件，并导出 Word 工作档案或完整 ZIP 包。
 
-## Windows 安装版
+## Windows 安装版（2.0）
 
-安装 EXE 后，双击桌面“昌福里社区电梯管理系统”即可打开主机上的桌面窗口，直接进入工作台。安装包内置 Python 和页面，桌面窗口需要 Microsoft Edge WebView2 Runtime。其他电脑或手机访问台账期间，请保持主机应用打开。关闭桌面窗口会停止主机服务。
+安装 `ChangfuliElevatorDesktop-Setup-2.0.0-x64.exe` 时可自行选择程序安装目录（不覆盖 1.x 旧版）。安装完成后，双击桌面“昌福里社区电梯管理系统 2.0”即可打开主机桌面窗口，无需登录直接进入工作台。安装包内置 Python 和页面，桌面窗口需要 Microsoft Edge WebView2 Runtime。其他电脑或手机访问台账期间，请保持主机桌面窗口打开；关闭桌面窗口会安全停止主机服务。
 
-安装、停止、升级和换电脑步骤见 [Windows 安装版使用说明](docs/WINDOWS_INSTALLER.md)。安装版把资料保存在 `C:\ProgramData\ChangfuliElevatorLedger`（以系统 ProgramData 实际位置为准），与程序目录分开；卸载程序保留资料。下文 BAT 和开发命令仅适用于源码版。
+安装、自定义目录、1.x 旧数据自动复制、停止、升级和换电脑步骤见 [Windows 安装版使用说明](docs/WINDOWS_INSTALLER.md)。2.0 安装版将业务数据库、附件、导出、备份、日志与 WebView2 缓存保存在当前登录用户的 `%LOCALAPPDATA%\ChangfuliElevatorDesktop`，与程序目录完全分离；若本机存有 1.x 旧目录 `%PROGRAMDATA%\ChangfuliElevatorLedger` 且 2.0 尚无数据库，首次启动会只读安全复制旧数据（保留原目录不删除）。卸载程序保留业务资料。下文 BAT 和开发命令仅适用于源码版。
 
 ## 技术栈
 
@@ -17,7 +17,7 @@
 
 ## 启动
 
-源码版先按 [INSTALL.md](INSTALL.md) 安装，然后在 Windows 主机双击 `启动电梯管理系统.bat`。浏览器打开 `http://127.0.0.1:8765`。主机和同网设备均直接进入工作台，可编辑同一套台账。仅向可信的物业站内网开放服务。
+源码版先按 [INSTALL.md](INSTALL.md) 安装，然后在 Windows 主机双击 `启动电梯管理系统.bat`。浏览器打开 `http://127.0.0.1:8766`。主机和同网设备均直接进入工作台，可编辑同一套台账。仅向可信的物业站内网开放服务。
 
 服务启动时，空台账可从随包初始表格一次建账。失败会回滚，修正文件并重新启动后可重试。详情见 [首次建账说明](docs/WINDOWS_INSTALLER.md#可选的首次建账)。
 
@@ -32,11 +32,11 @@ cd frontend && npm ci && npm run build
 cd .. && .venv/Scripts/python scripts/run.py
 ```
 
-macOS/Linux 第一步使用 `python3 -m venv .venv`，并把 `.venv/Scripts/python` 换成 `.venv/bin/python`。Windows 正式交付使用 Python 3.12 64位版本；`wheelhouse` 中的 Windows 依赖不能用于 macOS。开发时也可在 `frontend` 运行 `npm run dev`，API 代理到本机 8765 端口。
+macOS/Linux 第一步使用 `python3 -m venv .venv`，并把 `.venv/Scripts/python` 换成 `.venv/bin/python`。Windows 正式交付使用 Python 3.12 64位版本；`wheelhouse` 中的 Windows 依赖不能用于 macOS。开发时也可在 `frontend` 运行 `npm run dev`，API 代理到本机 8766 端口。
 
 ## 数据位置
 
-以下为数据根目录内的相对路径。EXE 安装版可从开始菜单“昌福里社区电梯管理系统 → 打开数据目录”进入；源码版默认在项目目录内。
+以下为数据根目录内的相对路径。2.0 EXE 安装版位于 `%LOCALAPPDATA%\ChangfuliElevatorDesktop`，可从开始菜单“昌福里社区电梯管理系统 2.0 → 打开数据目录 2.0”进入；源码版默认在项目目录内。
 
 | 目录 | 内容 |
 | --- | --- |
@@ -51,11 +51,11 @@ macOS/Linux 第一步使用 `python3 -m venv .venv`，并把 `.venv/Scripts/pyth
 
 ## 局域网访问
 
-安装版在网页“系统设置 → 局域网访问与二维码”查看主机地址；源码版启动窗口也会列出 `http://本机IP:8765`。也可在 Windows 命令提示符输入 `ipconfig`，查找正在使用网卡的 IPv4 地址。其他终端须连接同一局域网，再在浏览器输入这个地址。若打不开，检查主机 Windows 防火墙是否允许 TCP 8765 的局域网入站访问。
+安装版在网页“系统设置 → 局域网访问与二维码”查看主机地址；源码版启动窗口也会列出 `http://本机IP:8766`。也可在 Windows 命令提示符输入 `ipconfig`，查找正在使用网卡的 IPv4 地址。其他终端须连接同一局域网，再在浏览器输入这个地址。若打不开，检查主机 Windows 防火墙是否允许 TCP 8766 的局域网入站访问。
 
 Win7 终端只需 Chrome 109 或 Edge 109 浏览器，不安装 Python、Node 或数据库。浏览器不可使用过旧的 IE。Win7 的真实设备验收尚需在部署现场完成。
 
-二维码统一使用在“系统设置 → 局域网访问与二维码”保存的主机地址（例如 `http://192.168.1.20:8765`）。系统不会生成指向 `127.0.0.1` 或 `localhost` 的二维码；多网卡时需选择手机能访问的那一个。进入电梯档案，点“查看、下载与打印”可下载二维码或打印带电梯名称的标签。手机连接同一网络，扫码直接进入对应电梯。
+二维码统一使用在“系统设置 → 局域网访问与二维码”保存的主机地址（例如 `http://192.168.1.20:8766`）。系统不会生成指向 `127.0.0.1` 或 `localhost` 的二维码；多网卡时需选择手机能访问的那一个。进入电梯档案，点“查看、下载与打印”可下载二维码或打印带电梯名称的标签。手机连接同一网络，扫码直接进入对应电梯。
 
 ## 备份与演示数据
 

@@ -4,7 +4,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const base=process.env.AUDIT_URL||'http://127.0.0.1:8767';
 const out=process.env.AUDIT_OUTPUT||path.resolve('outputs/export-format-20260930');
 const endpoint=new URL(base);
-assert.ok(['127.0.0.1','localhost','[::1]'].includes(endpoint.hostname)&&endpoint.port&&endpoint.port!=='8765');
+assert.ok(['127.0.0.1','localhost','[::1]'].includes(endpoint.hostname)&&endpoint.port&&!['8765','8766'].includes(endpoint.port));
 (async()=>{
  const api=await request.newContext({baseURL:base});
  async function post(url,data){const r=await api.post(url,{data});assert.equal(r.status(),200,await r.text());return r.json()}
