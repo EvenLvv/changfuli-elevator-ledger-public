@@ -85,6 +85,12 @@ button {
 .panel-head h2 {
   margin:0
 }
+.parts-header, .parts-heading {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  column-gap:14px
+}
 .count {
   display:inline-block;
   font-size:12px;
