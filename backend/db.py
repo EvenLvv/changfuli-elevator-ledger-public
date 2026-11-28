@@ -105,6 +105,7 @@ def init_db():
           original_name TEXT NOT NULL, relative_path TEXT NOT NULL, category TEXT NOT NULL,
           mime_type TEXT NOT NULL, size INTEGER NOT NULL, uploaded_by INTEGER NOT NULL REFERENCES users(id),
           created_at TEXT NOT NULL, deleted_at TEXT);
+        CREATE INDEX IF NOT EXISTS idx_active_attachments_event ON attachments(event_id) WHERE deleted_at IS NULL;
         CREATE TABLE IF NOT EXISTS audit_logs (
           id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), action TEXT NOT NULL, target TEXT NOT NULL,
           target_id TEXT, before_json TEXT, after_json TEXT, created_at TEXT NOT NULL);
@@ -114,11 +115,19 @@ def init_db():
           filters_json TEXT NOT NULL, source_json TEXT NOT NULL, blocks_json TEXT NOT NULL,
           revision INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
           docx_name TEXT, zip_name TEXT);
+        CREATE TABLE IF NOT EXISTS draft_photos (
+          draft_id INTEGER NOT NULL REFERENCES export_drafts(id), id TEXT NOT NULL,
+          original_name TEXT NOT NULL, relative_path TEXT NOT NULL UNIQUE, mime_type TEXT NOT NULL,
+          size INTEGER NOT NULL, uploaded_by INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL,
+          PRIMARY KEY(draft_id,id));
         """)
         # Old records have no reliable indication of manual versus calculated cost.
         # Preserve their recorded totals; new records retain the user's choice.
         if 'cost_auto' not in {row['name'] for row in db.execute('PRAGMA table_info(events)')}:
             db.execute('ALTER TABLE events ADD COLUMN cost_auto INTEGER NOT NULL DEFAULT 0')
+        if 'maintenance_fund_cents' not in {row['name'] for row in db.execute('PRAGMA table_info(events)')}:
+            db.execute('''ALTER TABLE events ADD COLUMN maintenance_fund_cents INTEGER
+                CHECK(maintenance_fund_cents BETWEEN 1 AND 10000000000)''')
         if 'sort_order' not in {row['name'] for row in db.execute('PRAGMA table_info(attachments)')}:
             db.execute('ALTER TABLE attachments ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0')
         if 'version' not in {row['name'] for row in db.execute('PRAGMA table_info(elevators)')}:
