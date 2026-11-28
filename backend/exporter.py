@@ -35,6 +35,23 @@ def yuan(cents):
     return f"{Decimal(cents) / 100:.2f}元"
 
 
+def event_cost_lines(event):
+    lines = []
+    if event.get('maintenance_fund_cents') is not None:
+        lines.append(f"住宅维修基金金额：{yuan(event['maintenance_fund_cents'])}")
+    if event['cost_cents'] or not event.get('cost_auto'):
+        label = '历史登记费用' if event['parts'] or event['type'] == '配件更换' else '一般登记费用'
+        lines.append(f"{label}：{yuan(event['cost_cents'])}")
+    return lines
+
+
+def historical_part_cost(part):
+    unit_price = part['unit_price_cents']
+    if unit_price:
+        return f"历史配件单价：{yuan(unit_price)}；历史配件合计：{yuan(part['quantity'] * unit_price)}"
+    return ''
+
+
 def friendly_date(value):
     if not value:
         return "未填写"
@@ -283,9 +300,13 @@ def build_document(elevators, start, end, photos, directory):
         if not elevator["events"]:
             add_text(document, "所选时间段暂无工作记录。"); continue
         records = [(f"记录{e['record_number']}", e["occurred_on"], e["type"], e["title"],
-                    "、".join(f"{p['name']}×{p['quantity']}" for p in e["parts"]) or "—", yuan(e["cost_cents"])) for e in elevator["events"]]
-        add_table(document, ["编号", "日期", "类型", "工作内容", "更换配件", "费用"], records, [1.5, 2.4, 1.8, 4.5, 3.0, 2.4])
-        add_text(document, f"本周期登记费用合计：{yuan(sum(e['cost_cents'] for e in elevator['events']))}")
+                    "、".join(f"{p['name']}×{p['quantity']}" for p in e["parts"]) or "—",
+                    "\n".join(event_cost_lines(e))) for e in elevator["events"]]
+        add_table(document, ["编号", "日期", "类型", "工作内容", "更换配件", "资金与费用"], records, [1.5, 2.4, 1.8, 4.1, 2.7, 3.1])
+        fund_total = sum(e.get('maintenance_fund_cents') or 0 for e in elevator['events'])
+        add_text(document, f"本周期住宅维修基金金额合计：{yuan(fund_total) if fund_total else '无金额记录'}")
+        if any(e['cost_cents'] or not e.get('cost_auto') for e in elevator['events']):
+            add_text(document, f"本周期一般登记费用合计：{yuan(sum(e['cost_cents'] for e in elevator['events']))}")
         for event in elevator["events"]:
             document.add_page_break(); number = event["record_number"]
             add_heading(document, f"记录{number}  {event['type']}")
@@ -307,14 +328,16 @@ def build_document(elevators, start, end, photos, directory):
                 for part in event["parts"]:
                     add_text(document, f"配件：{part['name']}；型号：{part['model'] or '—'}；数量：{part['quantity']}")
                     add_table(document, ["项目", "内容", "项目", "内容"], [
-                        ("更换日期", part['replaced_on'], "单价", yuan(part['unit_price_cents'])),
-                        ("配件合计", yuan(part['quantity'] * part['unit_price_cents']), "质保天数", f"{part['warranty_days']}天"),
+                        ("更换日期", part['replaced_on'], "质保天数", f"{part['warranty_days']}天"),
                         ("质保开始", part['warranty_from'] or part['replaced_on'], "质保截止", part['warranty_until'] or '未设置')
                     ], [2.6, 5.2, 2.6, 5.2])
+                    if cost := historical_part_cost(part):
+                        add_text(document, cost)
                     for key, label in (("reason", "更换原因"), ("brand", "厂家或品牌"), ("notes", "配件备注")):
                         if part[key]:
                             add_text(document, f"{label}：{part[key]}")
-            add_text(document, f"记录费用：{yuan(event['cost_cents'])}")
+            for cost in event_cost_lines(event):
+                add_text(document, cost)
             pictures = [a for a in event["attachments"] if a["relative_path"].startswith("photos/")]
             if photos:
                 for offset in range(0, len(pictures), 4):
