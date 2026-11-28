@@ -30,6 +30,7 @@ SetDatablockOptimize on
 !define ICON_FILE "desktop-app-2.0.ico"
 !define PNG_ICON_FILE "desktop-app-2.0.png"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
+!define PENDING_INSTALLS_KEY "Software\${APP_ID}\PendingInstalls"
 !define FIREWALL_RULE "ChangfuliElevatorDesktop.PrivateLAN.8766"
 
 Name "${APP_NAME}"
@@ -204,8 +205,7 @@ Function ${PREFIX}CheckInstDirSafe
     Push "ok"
     Return
   ${EndIf}
-  ; 1.x also ships Uninstall.exe, a manifest and a launcher. Require the
-  ; registered 2.x location and its desktop icon before removing program files.
+  ; 1.x also ships Uninstall.exe, a manifest and a launcher.
   ReadRegStr $0 HKLM "${UNINSTALL_KEY}" "InstallLocation"
   ${If} $0 == "$INSTDIR"
   ${AndIf} ${FileExists} "$INSTDIR\${ICON_FILE}"
@@ -213,6 +213,14 @@ Function ${PREFIX}CheckInstDirSafe
     Push "ok"
     Return
   ${EndIf}
+  !if "${PREFIX}" == ""
+    ReadRegDWORD $0 HKLM "${PENDING_INSTALLS_KEY}" "$INSTDIR"
+    ${If} $0 == 1
+    ${AndIf} ${FileExists} "$INSTDIR\${ICON_FILE}"
+      Push "ok"
+      Return
+    ${EndIf}
+  !endif
   Push "无法确认所选文件夹是本产品的 2.x 安装目录。请选择空的专用文件夹，或选择原有的 2.x 安装目录进行升级。"
 FunctionEnd
 
@@ -380,8 +388,6 @@ FunctionEnd
   Delete "$INSTDIR\requirements.lock.txt"
   IfFileExists "$INSTDIR\BUILD-MANIFEST.json" 0 +2
   Delete "$INSTDIR\BUILD-MANIFEST.json"
-  IfFileExists "$INSTDIR\${ICON_FILE}" 0 +2
-  Delete "$INSTDIR\${ICON_FILE}"
   IfFileExists "$INSTDIR\${PNG_ICON_FILE}" 0 +2
   Delete "$INSTDIR\${PNG_ICON_FILE}"
 !macroend
@@ -423,6 +429,20 @@ Section "安装主程序" SEC_MAIN
 
   Call BeginMaintenance
   Call StopCandidate
+  ; Bind this attempt to its validated path before copying the payload.
+  ; Move the 2.x icon first so cleanup and a partial bulk copy retain proof of ownership.
+  ClearErrors
+  StrCpy $0 0
+  WriteRegDWORD HKLM "${PENDING_INSTALLS_KEY}" "$INSTDIR" 1
+  ${IfNot} ${Errors}
+    ; MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED (custom install drive).
+    System::Call 'kernel32::MoveFileExW(w "$PLUGINSDIR\payload\${ICON_FILE}", w "$INSTDIR\${ICON_FILE}", i 3) i.r0'
+  ${EndIf}
+  ${If} $0 == 0
+    MessageBox MB_OK|MB_ICONSTOP "无法登记本次安装或写入程序图标，请检查权限和磁盘空间后重试。" /SD IDOK
+    SetErrorLevel 4
+    Abort
+  ${EndIf}
   ClearErrors
   !insertmacro RemoveProgramFiles
   ${If} ${Errors}
@@ -492,6 +512,8 @@ Section "安装主程序" SEC_MAIN
     SetErrorLevel 7
     Abort
   ${EndIf}
+  DeleteRegValue HKLM "${PENDING_INSTALLS_KEY}" "$INSTDIR"
+  DeleteRegKey /ifempty HKLM "${PENDING_INSTALLS_KEY}"
   SetErrorLevel 0
 SectionEnd
 
@@ -522,6 +544,7 @@ Section "Uninstall"
   SetOutPath "$TEMP"
   ClearErrors
   !insertmacro RemoveProgramFiles
+  Delete "$INSTDIR\${ICON_FILE}"
   !insertmacro RemoveShortcuts " 2.0"
   !insertmacro RemoveShortcuts ""
   ${If} ${Errors}
@@ -530,6 +553,8 @@ Section "Uninstall"
     Abort
   ${EndIf}
   DeleteRegKey HKLM "${UNINSTALL_KEY}"
+  DeleteRegValue HKLM "${PENDING_INSTALLS_KEY}" "$INSTDIR"
+  DeleteRegKey /ifempty HKLM "${PENDING_INSTALLS_KEY}"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR\seed"
   Call un.EndMaintenance

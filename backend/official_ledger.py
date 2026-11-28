@@ -4,6 +4,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
+from .db import SHANGHAI
 from .location import archive_number
 
 
@@ -31,6 +32,11 @@ def timestamp(value, label, epoch):
         return value.isoformat()
     except (ValueError, OverflowError) as exc:
         raise ValueError(f'{label}日期无效') from exc
+
+
+def fault_instant(value):
+    stamp = datetime.fromisoformat(value)
+    return stamp.replace(tzinfo=SHANGHAI) if stamp.tzinfo is None else stamp
 
 
 def sheet_rows(sheet, width, headers, limit):
@@ -184,8 +190,9 @@ def reconcile(db, workbook, user, create_lift, insert_event):
             AND COALESCE(NULLIF(symptom,''), title)=?
             AND COALESCE(NULLIF(remedy,''), NULLIF(work_content,''), resolution, '')=?""",
                               (lift_id, data['symptom'], data['remedy']))
+        imported_at = fault_instant(data['fault_at'])
         matched = next((r['id'] for r in existing if r['fault_at'] and
-                        datetime.fromisoformat(r['fault_at']) == datetime.fromisoformat(data['fault_at'])), None)
+                        fault_instant(r['fault_at']) == imported_at), None)
         if matched is None:
             insert_event(db, dict(data, elevator_id=lift_id), user)
             report['events_added'] += 1

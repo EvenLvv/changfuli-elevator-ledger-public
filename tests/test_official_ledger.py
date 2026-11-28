@@ -112,6 +112,35 @@ class OfficialLedgerTest(unittest.TestCase):
         self.assertEqual((again['added'], again['skipped'], again['events_added'], again['events_skipped']), (0,9,0,5))
         self.assertEqual(again['unmatched'], report['unmatched'])
 
+    def test_naive_fault_time_matches_existing_shanghai_event(self):
+        lift = self.post('/api/elevators', dict(building_name='41栋', unit_name='1单元',
+                         name='1号电梯', internal_number='410101'))
+        workbook = load_workbook(FIXTURE)
+        faults = workbook.worksheets[1]
+        faults.delete_rows(5, faults.max_row - 4)
+        faults['E4'] = datetime(2025, 1, 5, 8, 35)
+        event = dict(elevator_id=lift['id'], type='故障', title=faults['F4'].value,
+                     remedy=faults['H4'].value, occurred_on='2025-01-05')
+        stream = io.BytesIO()
+        workbook.save(stream)
+        workbook.close()
+
+        # Same clock reading in UTC is a different fault instant.
+        self.post('/api/events', dict(event, fault_at='2025-01-05T08:35:00+00:00'))
+        raw = stream.getvalue()
+        different = self.upload(raw=raw).json()
+        self.assertEqual((different['events_added'], different['events_skipped']), (1, 0))
+
+        local_time = '2025-01-05T08:35:00+08:00'
+        duplicate = self.post('/api/events', dict(event, fault_at=local_time))
+        preview = self.upload(raw=raw).json()
+        committed = self.upload(raw=raw, token=preview['preview_token']).json()
+        for result in (preview, committed):
+            self.assertEqual((result['events_added'], result['events_skipped']), (0, 1))
+            self.assertEqual(result['event_rows'][0]['existing_id'], duplicate['id'])
+        self.assertEqual(len(self.client.get('/api/events').json()), 2)
+        self.assertEqual(self.client.get(f"/api/events/{duplicate['id']}").json()['fault_at'], local_time)
+
     def test_existing_identities_real_time_and_stale_preview(self):
         old = dict(building_name='41栋', unit_name='1口', name='1号梯', internal_number='410101',
                    maintenance_contact='测试人员', maintenance_phone='000000', brand='测试品牌',

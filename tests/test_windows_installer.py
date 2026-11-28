@@ -302,7 +302,7 @@ class WindowsInstallerTest(unittest.TestCase):
         self.assertNotIn('CreateDirectory "$APPDATA', text)
         self.assertNotIn('elevator.db', text)
 
-    def test_nonempty_install_directory_requires_registered_desktop_installation(self):
+    def test_nonempty_install_directory_requires_completed_or_pending_ownership(self):
         text = (ROOT / 'scripts/windows_installer.nsi').read_text(encoding='utf-8')
         guard = text.split('Function ${PREFIX}CheckInstDirSafe\n', 1)[1].split('FunctionEnd', 1)[0]
         missing, existing = guard.split('IntOp $1 $0 & 0x400', 1)
@@ -317,7 +317,17 @@ class WindowsInstallerTest(unittest.TestCase):
             '  ${AndIf} ${FileExists} "$INSTDIR\\${ICON_FILE}"\n'
             '  ${AndIf} ${FileExists} "$INSTDIR\\Uninstall.exe"\n'
             '    Push "ok"\n    Return', registered)
-        self.assertIn('请选择空的专用文件夹', registered.split('${EndIf}', 1)[1])
+        complete, pending = registered.split('!if "${PREFIX}" == ""', 1)
+        self.assertEqual(complete.count('Push "ok"'), 1)
+        retry, refused = pending.split('!endif', 1)
+        self.assertEqual(retry.strip().splitlines()[0], 'ReadRegDWORD $0 HKLM "${PENDING_INSTALLS_KEY}" "$INSTDIR"')
+        self.assertIn(
+            '${If} $0 == 1\n'
+            '    ${AndIf} ${FileExists} "$INSTDIR\\${ICON_FILE}"\n'
+            '      Push "ok"\n      Return', retry)
+        self.assertEqual(retry.count('Push "ok"'), 1)
+        self.assertNotIn('Push "ok"', refused)
+        self.assertIn('请选择空的专用文件夹', refused)
 
         install = text.split('Section "安装主程序" SEC_MAIN', 1)[1].split('SectionEnd', 1)[0]
         self.assertLess(install.index('Call ValidateInstDir'), install.index('!insertmacro RemoveProgramFiles'))
@@ -325,6 +335,27 @@ class WindowsInstallerTest(unittest.TestCase):
         self.assertIn('Call ${PREFIX}CheckInstDirSafe', validate)
         self.assertIn('${If} $0 != "ok"', validate)
         self.assertIn('Abort', validate)
+
+    def test_pending_install_proof_survives_payload_failures(self):
+        text = (ROOT / 'scripts/windows_installer.nsi').read_text(encoding='utf-8')
+        self.assertIn(r'!define PENDING_INSTALLS_KEY "Software\${APP_ID}\PendingInstalls"', text)
+        install = text.split('Section "安装主程序" SEC_MAIN', 1)[1].split('SectionEnd', 1)[0]
+        forget = 'DeleteRegValue HKLM "${PENDING_INSTALLS_KEY}" "$INSTDIR"'
+        order = [install.index(step) for step in (
+            'Call BeginMaintenance', 'Call StopCandidate',
+            'WriteRegDWORD HKLM "${PENDING_INSTALLS_KEY}" "$INSTDIR" 1',
+            r'MoveFileExW(w "$PLUGINSDIR\payload\${ICON_FILE}", w "$INSTDIR\${ICON_FILE}"',
+            '!insertmacro RemoveProgramFiles', 'CopyFiles /SILENT',
+            r'"$INSTDIR\scripts\windows_launcher.py" --check',
+            'WriteRegStr HKLM "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"',
+            'Call EndMaintenance', forget)]
+        self.assertEqual(order, sorted(order))
+        self.assertGreater(install.index(forget), install.rindex('Abort'))
+        remove_files = text.split('!macro RemoveProgramFiles', 1)[1].split('!macroend', 1)[0]
+        self.assertNotIn('${ICON_FILE}', remove_files)
+        uninstall = text.split('Section "Uninstall"', 1)[1].split('SectionEnd', 1)[0]
+        self.assertIn(r'Delete "$INSTDIR\${ICON_FILE}"', uninstall)
+        self.assertIn(forget, uninstall)
 
     def test_maintenance_marker_uses_a_validated_handle_without_truncation(self):
         text = (ROOT / 'scripts/windows_installer.nsi').read_text(encoding='utf-8')
