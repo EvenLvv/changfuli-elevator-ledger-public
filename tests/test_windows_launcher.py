@@ -70,7 +70,8 @@ async def app(scope, receive, send):
         self.assertEqual(launcher.APP_ID, 'ChangfuliElevatorDesktop')
         self.assertNotEqual(launcher.APP_ID, 'ChangfuliElevatorLedger')
         self.assertEqual(launcher.PORT, 8766)
-        self.assertIn('2.0', launcher.WINDOW_TITLE)
+        self.assertEqual(launcher.APP_VERSION, '2.0.1')
+        self.assertEqual(launcher.WINDOW_TITLE, '昌福里社区电梯管理系统 2.0.1')
         self.assertNotEqual(launcher.LOCK_FILE, 'runtime-instance.lock')
         self.assertNotEqual(launcher.STATE_FILE, 'runtime-instance.json')
 
@@ -240,7 +241,7 @@ async def app(scope, receive, send):
         status, identity = request(launcher.IDENTITY_PATH, 'GET', headers=[(b'x-launcher-challenge', challenge.encode())])
         self.assertEqual(status, 200)
         self.assertEqual(identity['app'], 'ChangfuliElevatorDesktop')
-        self.assertEqual(identity['version'], '2.0.0')
+        self.assertEqual(identity['version'], '2.0.1')
         self.assertEqual(identity['proof'], launcher.signature(secret, challenge))
         self.assertNotIn(secret, json.dumps(identity))
 
@@ -395,6 +396,107 @@ async def app(scope, receive, send):
             report = json.loads((paths['LOGS'] / 'seed-import-report.json').read_text(encoding='utf-8'))
             self.assertTrue(report['committed'])
 
+    def test_legacy_search_paths_and_empty_migrated_db_still_seeds_from_program_root(self):
+        def make_legacy_db(base_dir, elevator_names=()):
+            legacy_root = base_dir / 'ChangfuliElevatorLedger'
+            (legacy_root / 'data').mkdir(parents=True, exist_ok=True)
+            (legacy_root / 'storage/photos').mkdir(parents=True, exist_ok=True)
+            db_file = legacy_root / 'data/elevator.db'
+            with closing(sqlite3.connect(db_file)) as conn:
+                conn.executescript("""
+                    CREATE TABLE buildings (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, deleted_at TEXT);
+                    CREATE TABLE units (id INTEGER PRIMARY KEY, building_id INTEGER NOT NULL, name TEXT NOT NULL, deleted_at TEXT);
+                    CREATE TABLE elevators (
+                      id INTEGER PRIMARY KEY, unit_id INTEGER NOT NULL REFERENCES units(id), name TEXT NOT NULL,
+                      internal_number TEXT, equipment_number TEXT, brand TEXT, model TEXT, manufactured_on TEXT,
+                      started_on TEXT, maintenance_company TEXT, maintenance_contact TEXT, maintenance_phone TEXT,
+                      inspection_on TEXT, maintenance_due_on TEXT, status TEXT NOT NULL DEFAULT '正常', notes TEXT,
+                      deleted_at TEXT, UNIQUE(unit_id,name));
+                """)
+                if elevator_names:
+                    conn.execute("INSERT INTO buildings(id, name) VALUES (1, '18栋')")
+                    conn.execute("INSERT INTO units(id, building_id, name) VALUES (1, 1, '1单元')")
+                    for idx, name in enumerate(elevator_names, 1):
+                        conn.execute("INSERT INTO elevators(id, unit_id, name) VALUES (?, 1, ?)", (idx, name))
+                conn.commit()
+            return legacy_root
+
+        # 1) ProgramData has an empty 1.x DB (0 elevators), LocalAppData has none, Roaming AppData has 2 elevators.
+        prog_empty = self.root / 'case1-ProgramData'
+        local_none = self.root / 'case1-LocalAppData'
+        roaming_has = self.root / 'case1-RoamingAppData'
+        prog_none_dir = prog_empty.mkdir() or make_legacy_db(prog_empty, ())
+        local_none.mkdir()
+        roaming_legacy = roaming_has.mkdir() or make_legacy_db(roaming_has, ('1号电梯', '2号电梯'))
+        (roaming_legacy / 'storage/photos/roaming.png').write_bytes(b'roaming-photo')
+
+        data_case1 = launcher.configure_data_paths(local_none, program_root=self.program)
+        self.assertTrue(launcher.migrate_legacy_data(
+            data_case1, program_data=prog_empty, local_app_data=local_none, roaming_app_data=roaming_has
+        ))
+        record1 = json.loads((data_case1 / launcher.MIGRATION_FILE).read_text(encoding='utf-8'))
+        self.assertEqual(Path(record1['source_root']), roaming_legacy)
+        self.assertEqual(record1['migrated_elevators'], 2)
+        self.assertEqual((data_case1 / 'storage/photos/roaming.png').read_bytes(), b'roaming-photo')
+        self.assertTrue((prog_none_dir / 'data/elevator.db').is_file())
+        self.assertTrue((roaming_legacy / 'data/elevator.db').is_file())
+
+        # Already has elevators in 2.0 -> never overwritten by another legacy tree.
+        local_other = make_legacy_db(local_none, ('9号电梯',))
+        self.assertFalse(launcher.migrate_legacy_data(
+            data_case1, program_data=prog_empty, local_app_data=local_none, roaming_app_data=roaming_has
+        ))
+        with closing(sqlite3.connect(data_case1 / 'data/elevator.db')) as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM elevators').fetchone()[0], 2)
+        self.assertTrue((local_other / 'data/elevator.db').is_file())
+
+        # 2) Existing 2.0.0 data root with an empty elevator.db (0 elevators) can still migrate LocalAppData 1.x ledger.
+        local_case2 = self.root / 'case2-LocalAppData'
+        local_case2.mkdir()
+        local_legacy2 = make_legacy_db(local_case2, ('1号电梯',))
+        data_case2 = launcher.configure_data_paths(local_case2, program_root=self.program)
+        with closing(sqlite3.connect(data_case2 / 'data/elevator.db')) as conn:
+            conn.execute('CREATE TABLE elevators (id INTEGER PRIMARY KEY, name TEXT, deleted_at TEXT)')
+            conn.commit()
+        self.assertTrue(launcher.migrate_legacy_data(
+            data_case2, program_data=self.root / 'nonexistent-pd', local_app_data=local_case2,
+            roaming_app_data=self.root / 'nonexistent-roam'
+        ))
+        with closing(sqlite3.connect(data_case2 / 'data/elevator.db')) as conn:
+            self.assertEqual(conn.execute('SELECT name FROM elevators').fetchall(), [('1号电梯',)])
+        self.assertTrue((local_legacy2 / 'data/elevator.db').is_file())
+
+        # 3) Empty migrated 1.x DB + installed program_root/seed/official-ledger.xlsx -> configure_seed_ledger + seed succeeds!
+        installed_seed = self.program / 'seed/official-ledger.xlsx'
+        installed_seed.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(FIXTURE_LEDGER, installed_seed)
+        os.environ.pop('ELEVATOR_SEED_LEDGER', None)
+        configured_seed = launcher.configure_seed_ledger(self.program)
+        self.assertEqual(configured_seed, installed_seed.resolve())
+        self.assertEqual(os.environ.get('ELEVATOR_SEED_LEDGER'), str(installed_seed.resolve()))
+
+        with isolated_app(seed=os.environ['ELEVATOR_SEED_LEDGER']) as (client, paths):
+            # Replace isolated DB with an empty migrated 1.x DB before restarting backend lifespan.
+            empty_v1_base = self.root / 'case3-ProgramData'
+            empty_v1_base.mkdir()
+            empty_v1_root = make_legacy_db(empty_v1_base, ())
+            (empty_v1_root / 'storage/photos/legacy-keep.png').write_bytes(b'keep')
+            v2_root = paths['DATA'].parent
+            paths['DB'].unlink(missing_ok=True)
+            self.assertTrue(launcher.migrate_legacy_data(
+                v2_root, program_data=empty_v1_base,
+                local_app_data=self.root / 'none-local', roaming_app_data=self.root / 'none-roam'
+            ))
+            self.assertEqual((paths['STORAGE'] / 'photos/legacy-keep.png').read_bytes(), b'keep')
+            from fastapi.testclient import TestClient
+            from backend.main import app
+            with TestClient(app) as seeded_client:
+                self.assertEqual(len(seeded_client.get('/api/elevators').json()), 9)
+                self.assertEqual(len(seeded_client.get('/api/events').json()), 5)
+                status = seeded_client.get('/api/seed-status').json()
+                self.assertTrue(status['committed'])
+                self.assertEqual((status['seed_elevators'], status['seed_events']), (9, 5))
+
     def test_busy_port_does_not_kill_service_or_open_window_and_releases_ownership(self):
         with socket.socket() as occupied:
             occupied.bind(('0.0.0.0', 0)); occupied.listen()
@@ -473,7 +575,7 @@ async def app(scope, receive, send):
                 # Simulate an old 1.x window still open alongside our 2.0 window.
                 if title == '昌福里社区电梯管理系统':
                     raise AssertionError('Must never query the 1.x window title')
-                return 123 if title == '昌福里社区电梯管理系统 2.0' else 0
+                return 123 if title == '昌福里社区电梯管理系统 2.0.1' else 0
 
             api.FindWindowW.side_effect = find_window
 
@@ -483,7 +585,7 @@ async def app(scope, receive, send):
 
             api.GetWindowThreadProcessId.side_effect = get_owner
             launcher.activate_existing_window(45)
-            api.FindWindowW.assert_called_once_with(None, '昌福里社区电梯管理系统 2.0')
+            api.FindWindowW.assert_called_once_with(None, '昌福里社区电梯管理系统 2.0.1')
             api.ShowWindow.assert_called_once()
             api.SetForegroundWindow.assert_called_once()
             api.MessageBoxW.assert_not_called()
@@ -547,7 +649,7 @@ async def app(scope, receive, send):
                     self.assertEqual(os.environ['WEBVIEW2_USER_DATA_FOLDER'], expected_wv2)
                     self.assertEqual(gui.start.call_args.kwargs['storage_path'], expected_wv2)
                 gui.create_window.assert_called_once_with(
-                    '昌福里社区电梯管理系统 2.0', 'http://127.0.0.1:8766',
+                    '昌福里社区电梯管理系统 2.0.1', 'http://127.0.0.1:8766',
                     width=1440, height=900, maximized=True, text_select=True,
                 )
                 self.assertEqual(gui.start.call_args.kwargs['gui'], 'edgechromium')

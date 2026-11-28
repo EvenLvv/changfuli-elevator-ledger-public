@@ -16,9 +16,9 @@ const props = defineProps<{
   elevatorLabels: Map<number, string>
 }>()
 const router = useRouter()
-const period = ref<Period | '单日'>('近7天')
+const period = ref<Period | '单日'>('全部')
 const current = ref(today())
-const range = ref(periodRange('近7天', current.value))
+const range = ref(periodRange('全部', current.value))
 const month = ref(current.value.slice(0, 7) + '-01')
 const elevator = ref<number>(), category = ref(''), search = ref('')
 const select = ref<SelectInstance>()
@@ -91,7 +91,7 @@ watch([range, month, elevator, category, retry], async (_, __, onCleanup) => {
   <section class="operations">
     <div class="page-heading">
       <div><div class="eyebrow">操作留痕 · 按日分隔</div><h1>工作记录</h1>
-        <p>每一次操作都会记入时间轴，最新的记录在最上方。可用日历查看某一天，或选择今天、近7天、本月、本季度。</p>
+        <p>每一次操作都会记入时间轴，默认展示全部历史记录，最新的记录在最上方。可用日历查看某一天，或切换全部、今天、近7天、本月、本季度。</p>
       </div>
       <el-button type="primary" size="large" @click="router.push('/events/new')">＋ 新增工作记录</el-button>
     </div>
@@ -120,10 +120,10 @@ watch([range, month, elevator, category, retry], async (_, __, onCleanup) => {
           <button aria-label="上个月" @click="shiftMonth(-1)">‹</button><button aria-label="下个月" @click="shiftMonth(1)">›</button>
         </div></header>
         <div class="periods"><button v-for="p in presets" :key="p" :aria-pressed="period===p" @click="choosePeriod(p)">{{p}}</button></div>
-        <p class="range-note" aria-live="polite">已选 {{dateLabel(range[0])}}<template v-if="range[0]!==range[1]"> — {{dateLabel(range[1])}}</template>，{{pending?'读取中…':'共 '+result.total+' 条操作'}}</p>
+        <p class="range-note" aria-live="polite">已选 <template v-if="period==='全部'">全部日期</template><template v-else>{{dateLabel(range[0])}}<template v-if="range[0]!==range[1]"> — {{dateLabel(range[1])}}</template></template>，{{pending?'读取中…':'共 '+result.total+' 条操作'}}</p>
         <div class="week"><span v-for="day in weekdays" :key="day">{{day}}</span></div>
         <div class="days"><button v-for="day in cells" :key="day" :aria-label="dateLabel(day,true)+(pins.has(day)?'，有操作记录':'')"
-          :class="{muted:day.slice(0,7)!==month.slice(0,7), selected:day>=range[0] && day<=range[1], end:day===range[1], today:day===current}"
+          :class="{muted:day.slice(0,7)!==month.slice(0,7), selected:period!=='全部' && day>=range[0] && day<=range[1], end:period!=='全部' && day===range[1], today:day===current}"
           @click="chooseDay(day)">{{Number(day.slice(8))}}<i v-if="pins.has(day)" class="pin"/></button></div>
         <small class="legend">当天有操作记录</small>
         <el-form label-position="top" class="timeline-filters">

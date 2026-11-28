@@ -1,12 +1,12 @@
-# 昌福里社区27区党群物业服务站电梯管理台账 2.0.0
+# 昌福里社区27区党群物业服务站电梯管理台账 2.0.1
 
 供物业站在一台 Windows 10 / 11 主机上运行，其他电脑或手机通过同一局域网的浏览器访问。记录一梯一档、维保故障维修和配件更换，集中保存照片附件，并导出 Word 工作档案或完整 ZIP 包。
 
 ## Windows 安装版（2.0）
 
-安装 `ChangfuliElevatorDesktop-Setup-2.0.0-x64.exe` 时可自行选择程序安装目录（不覆盖 1.x 旧版）。安装完成后，双击桌面“昌福里社区电梯管理系统 2.0”即可打开主机桌面窗口，无需登录直接进入工作台。安装包内置 Python 和页面，桌面窗口需要 Microsoft Edge WebView2 Runtime。其他电脑或手机访问台账期间，请保持主机桌面窗口打开；关闭桌面窗口会安全停止主机服务。
+安装 `ChangfuliElevatorDesktop-Setup-2.0.1-x64.exe` 时可自行选择程序安装目录（不覆盖 1.x 旧版）。安装完成后，双击桌面“昌福里社区电梯管理系统 2.0”即可打开主机桌面窗口（窗口标题显示 `2.0.1`），无需登录直接进入工作台。安装包内置 Python 和页面，桌面窗口需要 Microsoft Edge WebView2 Runtime。其他电脑或手机访问台账期间，请保持主机桌面窗口打开；关闭桌面窗口会安全停止主机服务。
 
-安装、自定义目录、1.x 旧数据自动复制、停止、升级和换电脑步骤见 [Windows 安装版使用说明](docs/WINDOWS_INSTALLER.md)。2.0 安装版将业务数据库、附件、导出、备份、日志与 WebView2 缓存保存在当前登录用户的 `%LOCALAPPDATA%\ChangfuliElevatorDesktop`，与程序目录完全分离；若本机存有 1.x 旧目录 `%PROGRAMDATA%\ChangfuliElevatorLedger` 且 2.0 尚无数据库，首次启动会只读安全复制旧数据（保留原目录不删除）。卸载程序保留业务资料。下文 BAT 和开发命令仅适用于源码版。
+安装、自定义目录、1.x 旧数据自动复制、停止、升级和换电脑步骤见 [Windows 安装版使用说明](docs/WINDOWS_INSTALLER.md)。2.0 安装版将业务数据库、附件、导出、备份、日志与 WebView2 缓存保存在当前登录用户的 `%LOCALAPPDATA%\ChangfuliElevatorDesktop`，与程序目录完全分离；当 2.0 尚无数据库或电梯表为空时，会依次在 `%PROGRAMDATA%\ChangfuliElevatorLedger`、`%LOCALAPPDATA%\ChangfuliElevatorLedger` 和 `%APPDATA%\ChangfuliElevatorLedger` 查找旧版台账并只读安全复制（保留原目录不删除）。卸载程序保留业务资料。下文 BAT 和开发命令仅适用于源码版。
 
 ## 技术栈
 

@@ -74,6 +74,28 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(result['total'], 2)
         self.assertEqual(result['dates'], ['2026-11-21','2026-11-22','2026-11-28'])
 
+    def test_frontend_all_period_is_default_and_returns_records_outside_last_seven_days(self):
+        root = Path(__file__).resolve().parents[1]
+        calendar_ts = (root / 'frontend/src/calendar.ts').read_text(encoding='utf-8')
+        timeline_vue = (root / 'frontend/src/components/OperationTimeline.vue').read_text(encoding='utf-8')
+        self.assertIn("export const presets = ['全部', '今天', '近7天', '本月', '本季度'] as const", calendar_ts)
+        self.assertIn("if (period === '全部') return ['1900-01-01', '9999-12-31']", calendar_ts)
+        self.assertIn("const period = ref<Period | '单日'>('全部')", timeline_vue)
+        self.assertIn("const range = ref(periodRange('全部', current.value))", timeline_vue)
+
+        stamps = ('2024-02-15T10:20:00+08:00', '2025-01-05T08:35:00+08:00', '2026-11-28T09:00:00+08:00')
+        for stamp in stamps:
+            self.clock.return_value = stamp
+            self.event('记录-' + stamp[:10])
+        seven_days = self.feed(start='2026-11-22', end='2026-11-28', type='故障')
+        self.assertEqual([x['title'] for x in seven_days['items']], ['记录-2026-11-28'])
+        all_history = self.feed(start='1900-01-01', end='9999-12-31', month='2026-11-01', type='故障')
+        self.assertEqual(
+            [x['title'] for x in all_history['items']],
+            ['记录-2026-11-28', '记录-2025-01-05', '记录-2024-02-15'],
+        )
+        self.assertEqual(all_history['dates'], ['2026-11-28'])
+
     def test_shanghai_range_order_and_independent_calendar_month(self):
         times = ('2026-10-31T15:59:59.999999+00:00', '2026-10-31T16:00:00+00:00',
                  '2026-11-02T01:30:00+09:00', '2026-11-01T17:00:00+00:00')

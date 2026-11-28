@@ -714,3 +714,37 @@ input[type=file]{color:var(--muted);min-width:0;width:100%}
   .main-area .records-page { display: flex; flex-direction: column; flex: 1; min-height: 0; padding-bottom: 5px; }
 }
 .top-actions .local-status { display: inline-flex; align-items: center; white-space: nowrap; font-size: 12px; }
+.seed-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 22px 0 0;
+  padding: 12px 16px;
+  border: 1px solid #dbe4f3;
+  border-radius: 8px;
+  background: #f4f7fc;
+  color: #334663;
+  font-size: 13px;
+  line-height: 1.65;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.seed-banner.archive-seed-banner {
+  margin: 0 0 18px;
+}
+.seed-banner.warn {
+  border-color: #ecd7b2;
+  background: #fffaf0;
+  color: #7c5211;
+}
+.seed-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #3b806b;
+  margin-top: 7px;
+  flex: none;
+}
+.seed-banner.warn .seed-dot {
+  background: #c2822b;
+}

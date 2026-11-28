@@ -1,14 +1,14 @@
-# Windows 安装与日常使用（2.0.0）
+# Windows 安装与日常使用（2.0.1）
 
 适用：Windows 10 / Windows 11 64 位主机。安装包内置 Python 3.12.10、Python 依赖和已构建页面。桌面窗口使用 Microsoft Edge WebView2 Runtime。若提示缺少运行时，请安装后重新打开系统，程序不会回退系统浏览器。无互联网的主机可由维护人员提前准备微软提供的 x64 Evergreen 独立安装程序。[微软 WebView2 下载页](https://developer.microsoft.com/microsoft-edge/webview2/#download-section)
 
 ## 安装与启动
 
-1. 在准备作为物业台账主机的电脑上运行 `ChangfuliElevatorDesktop-Setup-2.0.0-x64.exe`，核对安装包来源和交付的 SHA256。按中文向导安装并允许管理员授权。向导支持自由选择程序安装目录（默认 `C:\Program Files\ChangfuliElevatorDesktop`）；程序目录必须为本机磁盘上的普通文件夹，不可选磁盘根目录、系统目录、旧版 1.x 目录或数据目录。
-2. 安装完成后，请以日常使用的普通用户身份双击桌面“昌福里社区电梯管理系统 2.0”。服务就绪后会打开标题为“昌福里社区电梯管理系统 2.0”的桌面窗口，无需登录即可直接进入工作台。重复双击会切回已运行的 2.0 桌面窗口，不会连接或唤醒旧版 1.x 实例。
+1. 在准备作为物业台账主机的电脑上运行 `ChangfuliElevatorDesktop-Setup-2.0.1-x64.exe`，核对安装包来源和交付的 SHA256。按中文向导安装并允许管理员授权。向导支持自由选择程序安装目录（默认 `C:\Program Files\ChangfuliElevatorDesktop`）；程序目录必须为本机磁盘上的普通文件夹，不可选磁盘根目录、系统目录、旧版 1.x 目录或数据目录。
+2. 安装完成后，请以日常使用的普通用户身份双击桌面“昌福里社区电梯管理系统 2.0”。服务就绪后会打开标题为“昌福里社区电梯管理系统 2.0.1”的桌面窗口，无需登录即可直接进入工作台。重复双击会切回已运行的 2.0 桌面窗口，不会连接或唤醒旧版 1.x 实例。
 3. 手机扫码和其他电脑通过浏览器访问期间，请保持主机桌面窗口打开，可以最小化。停用前请通知各终端保存工作，然后关闭主机桌面窗口，或从开始菜单“昌福里社区电梯管理系统 2.0”选择“停止电梯管理系统 2.0”。两种方式都会安全停止主机 2.0 服务。
 
-开始菜单“昌福里社区电梯管理系统 2.0”文件夹内提供“启动电梯管理系统 2.0”“停止电梯管理系统 2.0”“打开数据目录 2.0”“卸载电梯管理系统 2.0”，名称独立于 1.x，不会覆盖旧版快捷方式。图标采用 2.0 钴蓝底“27”标志（`desktop-app-2.0.ico` / `desktop-app-2.0.png`）。
+开始菜单“昌福里社区电梯管理系统 2.0”文件夹内提供“启动电梯管理系统 2.0”“停止电梯管理系统 2.0”“打开数据目录 2.0”“卸载电梯管理系统 2.0”，名称独立于 1.x，不会覆盖旧版快捷方式。图标采用洞石电梯门与钴蓝“27”徽章标志（`desktop-app-2.0.ico` / `desktop-app-2.0.png`）。
 
 ## 程序与数据分离及局域网访问
 
@@ -20,10 +20,11 @@
 
 ## 1.x 旧版资料自动安全复制与升级卸载
 
-首次启动 2.0 且当前用户 `%LOCALAPPDATA%\ChangfuliElevatorDesktop\data\elevator.db` 尚不存在时，若本机存在旧版 1.x 数据目录 `%PROGRAMDATA%\ChangfuliElevatorLedger`（含 `data\elevator.db`），启动器会将旧版目录中的 `data`、`storage`、`exports`、`backups` 安全复制到 2.0 用户数据目录，并在 2.0 数据根目录写入 `migration-from-v1.json` 迁移记录：
+启动 2.0 且当前用户 `%LOCALAPPDATA%\ChangfuliElevatorDesktop\data\elevator.db` 尚不存在或电梯表为空时，启动器会依次检查 `%PROGRAMDATA%\ChangfuliElevatorLedger`、`%LOCALAPPDATA%\ChangfuliElevatorLedger` 与 `%APPDATA%\ChangfuliElevatorLedger`（优先采用含在册电梯的旧版数据库），将旧版目录中的 `data`、`storage`、`exports`、`backups` 安全复制到 2.0 用户数据目录，并在 2.0 数据根目录写入 `migration-from-v1.json` 迁移记录：
 
-- 仅执行只读复制，**不移动、不删除** `%PROGRAMDATA%\ChangfuliElevatorLedger` 中的任何文件。
-- 若 2.0 用户数据目录中已经存在 `data\elevator.db`，则不会再次复制或覆盖现有 2.0 数据库，旧目录保持原样。
+- 仅执行只读复制，**不移动、不删除**任何 1.x 旧版目录中的文件。
+- 若 2.0 用户数据目录中已经存在包含电梯的 `data\elevator.db`，则绝不会再次复制或覆盖现有 2.0 数据库，旧目录保持原样。
+- 若复制后的 1.x 数据库电梯表为空，后续仍会继续执行随包预置台账自动建账。
 - 若旧版曾保存 `:8765` 的二维码地址，请在 2.0“系统设置 → 局域网访问与二维码”中更新为 `:8766` 后再重印二维码。
 
 升级 2.0 时，向导会从 2.0 专属注册表项自动带出上次选择的安装目录（也可重新指定），先安全停止本机 2.0 实例再更新程序文件，保留 `%LOCALAPPDATA%\ChangfuliElevatorDesktop` 中的全部业务资料。卸载 2.0 只移除当前 2.0 程序目录、2.0 快捷方式和 8766 防火墙规则，**不会删除用户本地数据目录，也不会删除 1.x 程序目录或 `ProgramData\ChangfuliElevatorLedger`**。
@@ -41,19 +42,19 @@
 构建机需要 Python（含 pip）和 NSIS 3。以下命令在项目根目录执行；只使用指定 ZIP、现有锁定依赖和本地 wheelhouse，不会从网络下载运行依赖。
 
 ```text
-.venv/bin/python scripts/build_windows_installer.py --python-zip outputs/windows-installer-20261029/downloads/python-3.12.10-embed-amd64.zip --output-dir outputs/windows-installer --version 2.0.0
+.venv/bin/python scripts/build_windows_installer.py --python-zip outputs/windows-installer-20261029/downloads/python-3.12.10-embed-amd64.zip --output-dir outputs/windows-installer --version 2.0.1
 ```
 
 如果 `makensis` 不在 PATH，增加 `--makensis /path/to/makensis`。只准备独立运行目录可增加 `--stage-only`。
 
 前置文件：已构建的 `frontend/dist`、`scripts/windows_launcher.py`、`scripts/desktop-app-2.0.ico`、`scripts/desktop-app-2.0.png`、`requirements.lock.txt` 与完整 Windows Python 3.12 wheelhouse。官方 Python ZIP 的 SHA256 固定为 `4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3`，不匹配会拒绝构建。
 
-构建输出为 `ChangfuliElevatorDesktop-Setup-2.0.0-x64.exe`、`.exe.sha256` 和 `stage/BUILD-MANIFEST.json`。内置运行目录只包含后端代码、启动器、已构建前端、2.0 图标、固定依赖与许可证，不包含业务数据库、测试数据、虚拟环境或 `node_modules`。
+构建输出为 `ChangfuliElevatorDesktop-Setup-2.0.1-x64.exe`、`.exe.sha256` 和 `stage/BUILD-MANIFEST.json`。内置运行目录只包含后端代码、启动器、已构建前端、2.0 图标、固定依赖与许可证，不包含业务数据库、测试数据、虚拟环境或 `node_modules`。
 
-发布前应在实际 Windows x64 主机完成现场验收：自定义目录安装、普通用户启动（确认窗口标题含 2.0 且免登录）、`%LOCALAPPDATA%\ChangfuliElevatorDesktop` 数据分离、1.x 旧数据安全复制保留原目录、与 1.x 共存互不干扰、局域网 8766 访问与扫码、关闭窗口停服，以及卸载保留数据与旧版目录。Windows 11 ARM 的 x64 模拟运行需单独验收。
+发布前应在实际 Windows x64 主机完成现场验收：自定义目录安装、普通用户启动（确认窗口标题含 2.0.1 且免登录）、`%LOCALAPPDATA%\ChangfuliElevatorDesktop` 数据分离、1.x 旧数据安全复制保留原目录、与 1.x 共存互不干扰、局域网 8766 访问与扫码、关闭窗口停服，以及卸载保留数据与旧版目录。Windows 11 ARM 的 x64 模拟运行需单独验收。
 
 ## 可选的首次建账
 
 默认构建只随附程序。维护人员制作内部建账安装包时，可在构建命令追加 `--seed-ledger /绝对路径/official-ledger.xlsx`，将表格复制到 `stage/seed/official-ledger.xlsx` 并计入构建清单；带表格的构建物仅保存在内部交付目录，不得提交至源码仓库。
 
-主机服务启动时，仅当数据库电梯表为空（例如本机无 1.x 旧数据可复制）且尚无导入成功标记时尝试首次建账。依次查找环境变量 `ELEVATOR_SEED_LEDGER` 指定的绝对路径、程序目录下的 `seed/official-ledger.xlsx`、数据目录 `data/seed/official-ledger.xlsx`，采用第一个存在的文件；缺少文件时正常启动。结果写入日志目录的 `seed-import-report.json`。失败时整批回滚，修正后重启可重试；成功后写入 `official_ledger_imported` 标记，后续补录请使用工作台“导入档案”。
+安装版启动器在导入后端前，若检测到程序目录存在 `seed/official-ledger.xlsx`，会将环境变量 `ELEVATOR_SEED_LEDGER` 设为该绝对路径。主机服务启动时，只要数据库电梯表为空（即使此前迁入了空 1.x 库或曾留有导入标记），就会尝试从 `ELEVATOR_SEED_LEDGER`、程序目录 `seed/official-ledger.xlsx` 或数据目录 `data/seed/official-ledger.xlsx` 自动建账；当至少存在一部电梯时自动跳过。结果写入日志目录的 `seed-import-report.json`，成功后写入 `official_ledger_imported` 标记并在首页和“电梯档案”页提示统计数量，失败时整批回滚且不在设置中保留成功标记，重新启动即可重试。

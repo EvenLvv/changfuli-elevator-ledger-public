@@ -73,7 +73,7 @@ class WindowsInstallerTest(unittest.TestCase):
         runtime.write_bytes(b'untrusted input')
         output = self.root / 'output'; output.mkdir()
         with self.assertRaisesRegex(ValueError, 'SHA256'):
-            builder.stage_application(runtime, self.root, output, '2.0.0')
+            builder.stage_application(runtime, self.root, output, '2.0.1')
         self.assertEqual(list(output.iterdir()), [])
         source = self.root / 'outside.txt'; source.write_text('must not be copied')
         link = self.root / 'link.txt'
@@ -122,7 +122,7 @@ class WindowsInstallerTest(unittest.TestCase):
             (packages / 'demo.py').write_text('VALUE=1', encoding='utf-8')
 
         with patch.object(builder, 'ROOT', source), patch.object(builder, 'PYTHON_SHA256', builder.sha256(python_zip)), patch.object(builder.subprocess, 'run', install):
-            stage = builder.stage_application(python_zip, self.root, output, '2.0.0')
+            stage = builder.stage_application(python_zip, self.root, output, '2.0.1')
             self.assertEqual((stage / 'runtime/python312._pth').read_text(), builder.PTH_CONTENT)
             self.assertFalse((stage / 'data').exists())
             self.assertFalse((stage / 'backend/__pycache__').exists())
@@ -131,22 +131,22 @@ class WindowsInstallerTest(unittest.TestCase):
             self.assertTrue((stage / builder.APP_ICON_PNG).is_file())
             manifest = json.loads((stage / 'BUILD-MANIFEST.json').read_text())
             self.assertEqual(manifest['product'], 'ChangfuliElevatorDesktop')
-            self.assertEqual(manifest['version'], '2.0.0')
+            self.assertEqual(manifest['version'], '2.0.1')
             for name, digest in manifest['files'].items():
                 self.assertEqual(builder.sha256(stage / name), digest)
             self.assertTrue((stage / 'licenses/demo-1.0.dist-info/LICENSE').is_file())
             self.assertFalse(list(stage.rglob('*.xlsx')))
             fixture = ROOT / 'tests/fixtures/synthetic-ledger-fixture.xlsx'
-            stage = builder.stage_application(python_zip, self.root, output, '2.0.0', seed_ledger=fixture)
+            stage = builder.stage_application(python_zip, self.root, output, '2.0.1', seed_ledger=fixture)
             manifest = json.loads((stage / 'BUILD-MANIFEST.json').read_text())
             self.assertEqual(manifest['files']['seed/official-ledger.xlsx'], builder.sha256(fixture))
             self.assertEqual((stage / 'seed/official-ledger.xlsx').read_bytes(), fixture.read_bytes())
             (stage / 'BUILD-MANIFEST.json').unlink()
             with self.assertRaises(ValueError):
-                builder.stage_application(python_zip, self.root, output, '2.0.0')
+                builder.stage_application(python_zip, self.root, output, '2.0.1')
             self.assertTrue((stage / 'backend/main.py').is_file())
 
-    def test_new_brand_icons_are_multisize_and_home_hero_remains_lobby_photo(self):
+    def test_new_brand_icons_are_multisize_emblem_and_home_hero_remains_lobby_photo(self):
         ico_path = ROOT / 'scripts/desktop-app-2.0.ico'
         png_path = ROOT / 'scripts/desktop-app-2.0.png'
         web_png_path = ROOT / 'frontend/src/assets/desktop-app-2.0.png'
@@ -156,11 +156,28 @@ class WindowsInstallerTest(unittest.TestCase):
         with Image.open(ico_path) as ico:
             self.assertEqual(ico.format, 'ICO')
             self.assertTrue({(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)}.issubset(ico.info.get('sizes', set())))
-        with Image.open(png_path) as png:
-            self.assertEqual(png.format, 'PNG')
-            self.assertGreaterEqual(png.size[0], 256)
-            self.assertEqual(png.size[0], png.size[1])
+        for icon_file in (png_path, web_png_path):
+            with Image.open(icon_file) as png:
+                self.assertEqual(png.format, 'PNG')
+                self.assertEqual(png.mode, 'RGBA')
+                self.assertGreaterEqual(png.size[0], 256)
+                self.assertEqual(png.size[0], png.size[1])
+                w, h = png.size
+                # Rounded plaque cropped tightly: corners are transparent, edge midpoints are opaque plaque.
+                self.assertEqual(png.getpixel((0, 0))[3], 0)
+                self.assertEqual(png.getpixel((w // 2, 2))[3], 255)
+                self.assertEqual(png.getpixel((2, h // 2))[3], 255)
+                # Center is warm elevator door light gap (not the retired flat cobalt #435ddd tile).
+                center = png.getpixel((w // 2, h // 2))
+                self.assertGreater(center[0], center[2])
+                self.assertNotEqual(center[:3], (67, 93, 221))
+                # Rich stone/steel emblem rather than a 2-3 color flat vector tile.
+                sampled = {png.getpixel((x, h // 2))[:3] for x in range(10, w - 10, 4)}
+                self.assertGreater(len(sampled), 40)
         self.assertNotEqual(ico_path.read_bytes(), (ROOT / 'scripts/windows-app.ico').read_bytes())
+        index_html = (ROOT / 'frontend/index.html').read_text(encoding='utf-8')
+        self.assertIn('/src/assets/desktop-app-2.0.png', index_html)
+        self.assertIn('2.0.1', index_html)
         app_vue = (ROOT / 'frontend/src/App.vue').read_text(encoding='utf-8')
         self.assertIn("./assets/elevator-lobby.jpg", app_vue)
         self.assertNotIn('architecture.svg', app_vue)
@@ -195,7 +212,7 @@ class WindowsInstallerTest(unittest.TestCase):
 
         # 2.0 identity, port 8766, distinct shortcuts, and no elevated LocalAppData DB creation.
         self.assertIn('!define APP_ID "ChangfuliElevatorDesktop"', uncommented)
-        self.assertIn('!define APP_VERSION "2.0.0"', uncommented)
+        self.assertIn('!define APP_VERSION "2.0.1"', uncommented)
         self.assertIn('!define FIREWALL_RULE "ChangfuliElevatorDesktop.PrivateLAN.8766"', uncommented)
         self.assertIn('localport=8766 program="$INSTDIR\\runtime\\pythonw.exe"', text)
         self.assertIn('Icon "${ICON_FILE}"', uncommented)

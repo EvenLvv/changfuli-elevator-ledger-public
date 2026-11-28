@@ -160,26 +160,88 @@ class OfficialLedgerTest(unittest.TestCase):
         with TestClient(app) as client:
             self.assertFalse(client.get('/api/setup/status').json()['needed'])
 
-    def test_first_launch_seeds_once_and_writes_private_summary(self):
+    def test_first_launch_seeds_and_retries_when_elevator_table_is_empty(self):
         from backend.db import connect
         with isolated_app(seed=FIXTURE.resolve()) as (client, paths):
             report_path = paths['LOGS'] / 'seed-import-report.json'
+            self.assertEqual(len(client.get('/api/elevators').json()), 9)
             self.assertEqual(len(client.get('/api/events').json()), 5)
             summary = json.loads(report_path.read_text(encoding='utf-8'))
             self.assertEqual((summary['added'], summary['events_added'], len(summary['unmatched'])), (9, 5, 1))
             self.assertIn('440201', summary['warnings'][0])
             self.assertNotIn('测C-', report_path.read_text(encoding='utf-8'))
+            # Non-empty elevator table skips re-seeding.
+            with patch('backend.main.read_records', side_effect=AssertionError('unexpected read when non-empty')) as reader:
+                self.restart()
+                reader.assert_not_called()
             with connect() as db:
                 saved = db.execute("SELECT value FROM system_settings WHERE key='official_ledger_imported'").fetchone()[0]
                 self.assertEqual(json.loads(saved), summary)
-                # Simulate an empty ledger with its successful seed setting retained.
+                # Simulate an empty elevator table even when a previous official_ledger_imported flag exists.
                 db.execute('DELETE FROM event_parts')
                 db.execute('DELETE FROM events')
                 db.execute('DELETE FROM elevators')
-            with patch('backend.main.read_records', side_effect=AssertionError('unexpected second read')) as reader:
-                self.restart()
-                reader.assert_not_called()
             self.assertEqual(client.get('/api/elevators').json(), [])
+            self.restart()
+            self.assertEqual(len(client.get('/api/elevators').json()), 9)
+            self.assertEqual(len(client.get('/api/events').json()), 5)
+
+            # Also retry when official_ledger_imported holds a stale/failed payload and elevator table is empty.
+            with connect() as db:
+                db.execute('DELETE FROM event_parts')
+                db.execute('DELETE FROM events')
+                db.execute('DELETE FROM elevators')
+                db.execute(
+                    "UPDATE system_settings SET value=? WHERE key='official_ledger_imported'",
+                    (json.dumps({'committed': False, 'added': 0}),),
+                )
+            self.restart()
+            self.assertEqual(len(client.get('/api/elevators').json()), 9)
+            self.assertTrue(json.loads(report_path.read_text(encoding='utf-8'))['committed'])
+
+    def test_seed_status_reports_counts_and_redacts_registration_numbers_on_failure_or_missing(self):
+        from backend.db import connect
+        # 1) Missing seed on empty DB
+        missing = self.client.get('/api/seed-status').json()
+        self.assertEqual(missing['status'], 'missing')
+        self.assertFalse(missing['committed'])
+        self.assertEqual((missing['elevator_count'], missing['event_count']), (0, 0))
+        self.assertIn('logs/seed-import-report.json', missing['message'])
+        self.assertNotIn('测C-', json.dumps(missing, ensure_ascii=False))
+        self.assertEqual(self.client.get('/api/dashboard').json()['seed_status']['status'], 'missing')
+
+        # 2) Failed seed must set committed=False, not insert official_ledger_imported, and never leak 测C-
+        from backend import main
+        seed = main.ROOT / 'seed/official-ledger.xlsx'
+        seed.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(FIXTURE, seed)
+        with connect() as db:
+            db.execute("INSERT INTO system_settings(key,value) VALUES('official_ledger_imported','{\"committed\":true}')")
+        with patch('backend.main.insert_event', side_effect=ValueError('1号电梯（测C-20001）与测C-10002校验中断')):
+            self.restart()
+        report_raw = (self.paths['LOGS'] / 'seed-import-report.json').read_text(encoding='utf-8')
+        report_data = json.loads(report_raw)
+        self.assertFalse(report_data['committed'])
+        self.assertNotIn('测C-', report_raw)
+        with connect() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM system_settings WHERE key='official_ledger_imported'").fetchone())
+        failed = self.client.get('/api/seed-status').json()
+        self.assertEqual(failed['status'], 'failed')
+        self.assertFalse(failed['committed'])
+        self.assertIn('logs/seed-import-report.json', failed['message'])
+        self.assertNotIn('测C-', json.dumps(failed, ensure_ascii=False))
+
+        # 3) Next launch succeeds without deleting data dir and shows preloaded counts
+        self.restart()
+        imported = self.client.get('/api/seed-status').json()
+        self.assertEqual(imported['status'], 'imported')
+        self.assertTrue(imported['committed'])
+        self.assertEqual((imported['seed_elevators'], imported['seed_events']), (9, 5))
+        self.assertEqual((imported['elevator_count'], imported['event_count']), (9, 5))
+        self.assertIn('9 部电梯', imported['message'])
+        self.assertIn('5 条工作记录', imported['message'])
+        self.assertNotIn('测C-', json.dumps(imported, ensure_ascii=False))
+        self.assertEqual(self.client.get('/api/dashboard').json()['seed_status'], imported)
 
     def test_late_seed_restart_retry_and_priority(self):
         report_path = self.paths['LOGS'] / 'seed-import-report.json'

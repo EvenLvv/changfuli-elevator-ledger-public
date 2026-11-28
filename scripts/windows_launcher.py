@@ -26,8 +26,8 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 APP_ID = 'ChangfuliElevatorDesktop'
 LEGACY_APP_ID = 'ChangfuliElevatorLedger'
-APP_VERSION = '2.0.0'
-WINDOW_TITLE = '昌福里社区电梯管理系统 2.0'
+APP_VERSION = '2.0.1'
+WINDOW_TITLE = '昌福里社区电梯管理系统 2.0.1'
 ICON_NAME = 'desktop-app-2.0.ico'
 WEBVIEW2_ERROR = '无法打开桌面窗口。请安装或修复 Microsoft Edge WebView2 Runtime，然后重新打开电梯管理系统。'
 PORT = 8766
@@ -82,6 +82,15 @@ def resolve_data_root(local_app_data=None, *, program_root=None):
     return data_root
 
 
+def configure_seed_ledger(program_root=None):
+    program = Path(os.path.abspath(program_root or Path(__file__).resolve().parents[1]))
+    seed_file = program / 'seed' / 'official-ledger.xlsx'
+    if _safe_legacy_entry(seed_file, directory=False):
+        os.environ['ELEVATOR_SEED_LEDGER'] = str(seed_file)
+        return seed_file
+    return None
+
+
 def configure_data_paths(local_app_data=None, *, program_root=None):
     data_root = resolve_data_root(local_app_data, program_root=program_root)
     for key, folder in [('DATA', 'data'), ('STORAGE', 'storage'), ('EXPORT', 'exports'),
@@ -95,6 +104,7 @@ def configure_data_paths(local_app_data=None, *, program_root=None):
     webview_dir.mkdir(parents=True, exist_ok=True)
     checked_data_path(data_root, 'WebView2', directory=True)
     os.environ['WEBVIEW2_USER_DATA_FOLDER'] = str(webview_dir)
+    configure_seed_ledger(program_root)
     return data_root
 
 
@@ -140,79 +150,184 @@ def _copy_legacy_tree(source_dir, target_dir, data_root, *, skip_names=()):
     return copied
 
 
-def migrate_legacy_data(data_root, program_data=None):
-    """Safely copy 1.x ProgramData ledger into an empty 2.0 data root without modifying or deleting 1.x files."""
+def _count_db_elevators(conn, *, active_only=False):
+    has_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='elevators'"
+    ).fetchone()
+    if not has_table:
+        return 0
+    if active_only:
+        columns = {row[1] for row in conn.execute('PRAGMA table_info(elevators)')}
+        if 'deleted_at' in columns:
+            return conn.execute('SELECT COUNT(*) FROM elevators WHERE deleted_at IS NULL').fetchone()[0]
+    return conn.execute('SELECT COUNT(*) FROM elevators').fetchone()[0]
+
+
+def _inspect_staged_sqlite(source_db, stage_dir, output_db=None):
+    """Copy a SQLite DB (and optional WAL/SHM sidecars) into stage_dir and verify quick_check."""
+    shutil.rmtree(stage_dir, ignore_errors=True)
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    staged_db = stage_dir / 'elevator.db'
+    shutil.copy2(source_db, staged_db)
+    for sidecar in ('elevator.db-wal', 'elevator.db-shm'):
+        sidecar_src = source_db.parent / sidecar
+        if _safe_legacy_entry(sidecar_src, directory=False):
+            shutil.copy2(sidecar_src, stage_dir / sidecar)
+    snapshot = output_db if output_db is not None else (stage_dir / 'snapshot.db')
+    snapshot.unlink(missing_ok=True)
+    with closing(sqlite3.connect(staged_db)) as source_conn, closing(sqlite3.connect(snapshot)) as target_conn:
+        source_conn.backup(target_conn)
+    with closing(sqlite3.connect(snapshot.resolve().as_uri() + '?mode=ro', uri=True)) as check_conn:
+        if check_conn.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+            raise sqlite3.DatabaseError('database failed quick_check')
+        total_elevators = _count_db_elevators(check_conn, active_only=False)
+        active_elevators = _count_db_elevators(check_conn, active_only=True)
+    return total_elevators, active_elevators
+
+
+def _legacy_candidate_roots(data_root, program_data=None, local_app_data=None, roaming_app_data=None):
+    raw_bases = [
+        program_data if program_data is not None else os.environ.get('PROGRAMDATA', ''),
+        local_app_data if local_app_data is not None else os.environ.get('LOCALAPPDATA', ''),
+        roaming_app_data if roaming_app_data is not None else os.environ.get('APPDATA', ''),
+    ]
+    resolved_target = Path(os.path.abspath(data_root))
+    seen = set()
+    roots = []
+    for raw in raw_bases:
+        if not raw:
+            continue
+        base = Path(raw)
+        if not base.is_absolute() or not _safe_legacy_entry(base, directory=True):
+            continue
+        legacy_root = base / LEGACY_APP_ID
+        resolved_legacy = Path(os.path.abspath(legacy_root))
+        if resolved_legacy in seen or resolved_legacy == resolved_target:
+            continue
+        if not _safe_legacy_entry(legacy_root, directory=True):
+            continue
+        legacy_data_dir = legacy_root / 'data'
+        legacy_db = legacy_data_dir / 'elevator.db'
+        if _safe_legacy_entry(legacy_data_dir, directory=True) and _safe_legacy_entry(legacy_db, directory=False):
+            seen.add(resolved_legacy)
+            roots.append(legacy_root)
+    return roots
+
+
+def migrate_legacy_data(data_root, program_data=None, *, local_app_data=None, roaming_app_data=None):
+    """Safely copy 1.x ledger into an absent or elevator-empty 2.0 data root without modifying 1.x files."""
+    new_data_dir = checked_data_path(data_root, 'data', directory=True)
     new_db = checked_data_path(data_root, 'data/elevator.db')
-    if new_db.exists():
-        return False
-    legacy_base = Path(program_data if program_data is not None else os.environ.get('PROGRAMDATA', ''))
-    if not legacy_base.is_absolute() or not _safe_legacy_entry(legacy_base, directory=True):
-        return False
-    legacy_root = legacy_base / LEGACY_APP_ID
-    if not _safe_legacy_entry(legacy_root, directory=True):
-        return False
-    legacy_data_dir = legacy_root / 'data'
-    legacy_db = legacy_data_dir / 'elevator.db'
-    if not _safe_legacy_entry(legacy_data_dir, directory=True) or not _safe_legacy_entry(legacy_db, directory=False):
+    for sidecar in ('data/elevator.db-wal', 'data/elevator.db-shm'):
+        checked_data_path(data_root, sidecar)
+
+    new_db_exists = new_db.exists()
+    if new_db_exists:
+        inspect_dir = new_data_dir / f'.inspect-v2-{os.getpid()}'
+        try:
+            existing_total, _ = _inspect_staged_sqlite(new_db, inspect_dir)
+        except (OSError, sqlite3.Error):
+            # Never overwrite an unreadable or corrupt 2.0 database; check_installation reports it.
+            return False
+        finally:
+            shutil.rmtree(inspect_dir, ignore_errors=True)
+        if existing_total > 0:
+            return False
+
+    candidates = _legacy_candidate_roots(
+        data_root, program_data=program_data, local_app_data=local_app_data, roaming_app_data=roaming_app_data
+    )
+    if not candidates:
         return False
 
-    new_data_dir = checked_data_path(data_root, 'data', directory=True)
     new_data_dir.mkdir(parents=True, exist_ok=True)
     stage_dir = new_data_dir / f'.legacy-migrate-{os.getpid()}'
     temp_db = checked_data_path(data_root, f'data/elevator.db.{os.getpid()}.tmp')
+    fallback_db = checked_data_path(data_root, f'data/elevator.db.{os.getpid()}.fallback.tmp')
+    chosen_root = None
+    chosen_elevators = 0
+    fallback_root = None
+
     try:
-        shutil.rmtree(stage_dir, ignore_errors=True)
-        stage_dir.mkdir(parents=True, exist_ok=True)
-        staged_db = stage_dir / 'elevator.db'
-        shutil.copy2(legacy_db, staged_db)
-        for sidecar in ('elevator.db-wal', 'elevator.db-shm'):
-            sidecar_src = legacy_data_dir / sidecar
-            if _safe_legacy_entry(sidecar_src, directory=False):
-                shutil.copy2(sidecar_src, stage_dir / sidecar)
-        temp_db.unlink(missing_ok=True)
-        with closing(sqlite3.connect(staged_db)) as source_conn, closing(sqlite3.connect(temp_db)) as target_conn:
-            source_conn.backup(target_conn)
-        with closing(sqlite3.connect(temp_db.resolve().as_uri() + '?mode=ro', uri=True)) as check_conn:
-            if check_conn.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
-                raise sqlite3.DatabaseError('migrated database failed quick_check')
+        for candidate_root in candidates:
+            candidate_db = candidate_root / 'data/elevator.db'
+            try:
+                _, active_elevators = _inspect_staged_sqlite(candidate_db, stage_dir, output_db=temp_db)
+            except (OSError, sqlite3.Error):
+                logging.warning('检测到 1.x 数据目录 %s，但旧数据库无法安全复制，已跳过该候选目录。',
+                                candidate_root, exc_info=True)
+                temp_db.unlink(missing_ok=True)
+                continue
+            if active_elevators > 0:
+                chosen_root = candidate_root
+                chosen_elevators = active_elevators
+                break
+            if not new_db_exists and fallback_root is None:
+                temp_db.replace(fallback_db)
+                fallback_root = candidate_root
+            else:
+                temp_db.unlink(missing_ok=True)
+
+        if chosen_root is None and fallback_root is not None:
+            fallback_db.replace(temp_db)
+            chosen_root = fallback_root
+            chosen_elevators = 0
+        if chosen_root is None:
+            return False
+
+        legacy_data_dir = chosen_root / 'data'
+        copied_folders = ['data']
+        copied_files = 1 + _copy_legacy_tree(
+            legacy_data_dir, new_data_dir, data_root, skip_names=SKIPPED_LEGACY_DATA_FILES
+        )
+        for folder in MIGRATED_FOLDERS[1:]:
+            source_folder = chosen_root / folder
+            if _safe_legacy_entry(source_folder, directory=True):
+                target_folder = checked_data_path(data_root, folder, directory=True)
+                target_folder.mkdir(parents=True, exist_ok=True)
+                copied_files += _copy_legacy_tree(source_folder, target_folder, data_root)
+                copied_folders.append(folder)
+
+        checked_data_path(data_root, 'data/elevator.db')
+        if new_db.exists():
+            inspect_dir = new_data_dir / f'.inspect-v2-{os.getpid()}'
+            try:
+                current_total, _ = _inspect_staged_sqlite(new_db, inspect_dir)
+            finally:
+                shutil.rmtree(inspect_dir, ignore_errors=True)
+            if current_total > 0:
+                return False
+            with closing(sqlite3.connect(temp_db)) as src_conn, closing(sqlite3.connect(new_db)) as dst_conn:
+                src_conn.backup(dst_conn)
+            temp_db.unlink(missing_ok=True)
+        else:
+            for sidecar in ('data/elevator.db-wal', 'data/elevator.db-shm'):
+                checked_data_path(data_root, sidecar).unlink(missing_ok=True)
+            temp_db.replace(new_db)
     except (OSError, sqlite3.Error):
-        logging.warning('检测到 1.x 数据目录 %s，但旧数据库无法安全复制，已跳过自动迁移。', legacy_root, exc_info=True)
-        temp_db.unlink(missing_ok=True)
+        logging.warning('自动迁移 1.x 数据失败，已保留原目录与当前状态。', exc_info=True)
         return False
     finally:
         shutil.rmtree(stage_dir, ignore_errors=True)
-
-    copied_folders = ['data']
-    copied_files = 1 + _copy_legacy_tree(
-        legacy_data_dir, new_data_dir, data_root, skip_names=SKIPPED_LEGACY_DATA_FILES
-    )
-    for folder in MIGRATED_FOLDERS[1:]:
-        source_folder = legacy_root / folder
-        if _safe_legacy_entry(source_folder, directory=True):
-            target_folder = checked_data_path(data_root, folder, directory=True)
-            target_folder.mkdir(parents=True, exist_ok=True)
-            copied_files += _copy_legacy_tree(source_folder, target_folder, data_root)
-            copied_folders.append(folder)
-
-    if new_db.exists():
         temp_db.unlink(missing_ok=True)
-        return False
-    temp_db.replace(new_db)
+        fallback_db.unlink(missing_ok=True)
 
     record = {
         'migrated_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
         'source_app_id': LEGACY_APP_ID,
         'target_app_id': APP_ID,
-        'source_root': str(legacy_root),
+        'source_root': str(chosen_root),
         'target_root': str(data_root),
         'copied_folders': copied_folders,
         'copied_files': copied_files,
+        'migrated_elevators': chosen_elevators,
     }
     record_tmp = checked_data_path(data_root, f'{MIGRATION_FILE}.{os.getpid()}.tmp')
     checked_data_path(data_root, MIGRATION_FILE)
     record_tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     record_tmp.replace(checked_data_path(data_root, MIGRATION_FILE))
-    logging.info('已从 1.x 目录安全复制台账资料：%s -> %s（共 %s 个文件）', legacy_root, data_root, copied_files)
+    logging.info('已从 1.x 目录安全复制台账资料：%s -> %s（共 %s 个文件，%s 部电梯）',
+                 chosen_root, data_root, copied_files, chosen_elevators)
     return True
 
 
@@ -491,6 +606,7 @@ def run_server(program_root, data_root, port=PORT, app=None, quiet=False, progra
     try:
         if (program_root / 'maintenance.flag').exists() or checked_data_path(data_root, 'maintenance.flag').exists():
             raise RuntimeError('电梯台账正在安装或维护，请完成操作后再启动。')
+        configure_seed_ledger(program_root)
         migrate_legacy_data(data_root, program_data=program_data)
         check_installation(program_root, data_root)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

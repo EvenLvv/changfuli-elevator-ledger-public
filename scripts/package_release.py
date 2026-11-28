@@ -4,7 +4,7 @@ from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 
 root = Path(__file__).resolve().parents[1]
-target = root / '昌福里社区27区党群物业服务站_电梯管理台账_2.0.0_源码与页面.zip'
+target = root / '昌福里社区27区党群物业服务站_电梯管理台账_2.0.1_源码与页面.zip'
 prefix = 'elevator-management/'
 files = set(root.glob('*.md')) | set(root.glob('*.bat')) | set(root.glob('requirements*.txt'))
 for folder in ('backend', 'scripts', 'tests', 'docs', 'wheelhouse', 'frontend'):

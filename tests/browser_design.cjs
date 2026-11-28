@@ -113,11 +113,13 @@ assert.ok(['127.0.0.1','[::1]','localhost'].includes(endpoint.hostname)&&!['8765
   await page.setViewportSize({width:1500,height:1060});
   await page.goto(base+'/records');
   await page.locator('button.operation-card').first().waitFor();
+  assert.equal(await page.getByRole('button',{name:'全部',exact:true}).getAttribute('aria-pressed'),'true');
   // The device clock is still in March in UTC, but Shanghai has entered April and Q2.
   await page.clock.setFixedTime(new Date('2026-03-31T16:05:00Z'));
   for (const [label,start,end] of [
    ['今天','2026-04-01','2026-04-01'], ['近7天','2026-03-26','2026-04-01'],
-   ['本月','2026-04-01','2026-04-30'], ['本季度','2026-04-01','2026-06-30']
+   ['本月','2026-04-01','2026-04-30'], ['本季度','2026-04-01','2026-06-30'],
+   ['全部','1900-01-01','9999-12-31']
   ]) {
    const query=recordsRequest();
    await page.getByRole('button',{name:label,exact:true}).click();

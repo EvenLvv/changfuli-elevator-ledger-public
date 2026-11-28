@@ -25,10 +25,11 @@ export function calendarDay(day: string, months = 0, days = 0) {
   return result
 }
 
-export const presets = ['今天', '近7天', '本月', '本季度'] as const
+export const presets = ['全部', '今天', '近7天', '本月', '本季度'] as const
 export type Period = typeof presets[number]
 
 export function periodRange(period: Period, current: string) {
+  if (period === '全部') return ['1900-01-01', '9999-12-31']
   const first = current.slice(0, 7) + '-01'
   if (period === '今天') return [current, current]
   if (period === '近7天') return [isoDay(calendarDay(current, 0, -6)), current]

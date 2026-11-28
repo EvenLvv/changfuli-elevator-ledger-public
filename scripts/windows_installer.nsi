@@ -17,7 +17,7 @@ SetDatablockOptimize on
   !error "Pass -DOUT_FILE=<installer.exe>"
 !endif
 !ifndef APP_VERSION
-  !define APP_VERSION "2.0.0"
+  !define APP_VERSION "2.0.1"
 !endif
 !ifndef PAYLOAD_KB
   !define PAYLOAD_KB 0
@@ -37,14 +37,14 @@ InstallDir "$PROGRAMFILES64\${APP_ID}"
 InstallDirRegKey HKLM "${UNINSTALL_KEY}" "InstallLocation"
 Icon "${ICON_FILE}"
 UninstallIcon "${ICON_FILE}"
-BrandingText "昌福里社区27区党群物业服务站 · 2.0"
+BrandingText "昌福里社区27区党群物业服务站 · ${APP_VERSION}"
 ShowInstDetails show
 ShowUninstDetails show
 VIProductVersion "${APP_VERSION}.0"
 VIAddVersionKey /LANG=2052 "ProductName" "${APP_NAME}"
 VIAddVersionKey /LANG=2052 "ProductVersion" "${APP_VERSION}"
 VIAddVersionKey /LANG=2052 "FileVersion" "${APP_VERSION}"
-VIAddVersionKey /LANG=2052 "FileDescription" "昌福里社区电梯管理系统 2.0 安装程序"
+VIAddVersionKey /LANG=2052 "FileDescription" "昌福里社区电梯管理系统 ${APP_VERSION} 安装程序"
 VIAddVersionKey /LANG=2052 "LegalCopyright" "昌福里社区27区党群物业服务站"
 
 !define MUI_ABORTWARNING

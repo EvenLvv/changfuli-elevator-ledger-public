@@ -388,18 +388,138 @@ def audit_import(db, user, target, elevators, events=0, unmatched=0):
           after={'summary': f'新增 {elevators} 部电梯、{events} 条工作记录，{unmatched} 条待核验'})
 
 
+def _find_seed_ledger_path():
+    configured = Path(os.environ.get('ELEVATOR_SEED_LEDGER', ''))
+    paths = [configured] if configured.is_absolute() else []
+    paths.extend([ROOT / 'seed/official-ledger.xlsx', DATA / 'seed/official-ledger.xlsx'])
+    return next((p for p in paths if p.is_file()), None)
+
+
+def _sanitize_seed_error(text):
+    cleaned = re.sub(r'（[^）]*）|\([^)]*\)', '', str(text or '')).strip()
+    cleaned = re.sub(r'[\u4e00-\u9fffA-Za-z]{0,4}[A-Za-z]-[0-9A-Za-z-]+', '登记证号已隐去', cleaned)
+    cleaned = re.sub(r'梯[0-9A-Za-z\u4e00-\u9fff-]{4,}', '登记证号已隐去', cleaned)
+    return cleaned[:200] or '无法读取或写入初始台账'
+
+
+def _read_seed_report_file():
+    report_file = LOGS / 'seed-import-report.json'
+    if not report_file.is_file():
+        return None
+    try:
+        data = json.loads(report_file.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return {'committed': False, 'error': '初始台账导入报告无法读取'}
+
+
+def seed_status_data(db):
+    elevator_count = db.execute('SELECT COUNT(*) FROM elevators WHERE deleted_at IS NULL').fetchone()[0]
+    event_count = db.execute(
+        'SELECT COUNT(*) FROM events v JOIN elevators e ON e.id=v.elevator_id '
+        'WHERE v.deleted_at IS NULL AND e.deleted_at IS NULL'
+    ).fetchone()[0]
+    total_elevators = db.execute('SELECT COUNT(*) FROM elevators').fetchone()[0]
+    saved_row = get_one(db, "SELECT value FROM system_settings WHERE key='official_ledger_imported'")
+    saved = None
+    if saved_row:
+        try:
+            parsed = json.loads(saved_row['value'])
+            if isinstance(parsed, dict):
+                saved = parsed
+        except ValueError:
+            saved = None
+    report = _read_seed_report_file()
+    report_rel = 'logs/seed-import-report.json'
+
+    if total_elevators > 0:
+        if saved and saved.get('committed') is True:
+            seed_elevators = int(saved.get('added') or 0)
+            seed_events = int(saved.get('events_added') or 0)
+            return {
+                'status': 'imported',
+                'committed': True,
+                'elevator_count': elevator_count,
+                'event_count': event_count,
+                'seed_elevators': seed_elevators,
+                'seed_events': seed_events,
+                'report_path': report_rel,
+                'error': '',
+                'message': (
+                    f'已导入预置台账：{seed_elevators} 部电梯、{seed_events} 条工作记录'
+                    f'（当前在册 {elevator_count} 部电梯、{event_count} 条工作记录）。'
+                ),
+            }
+        return {
+            'status': 'ready',
+            'committed': False,
+            'elevator_count': elevator_count,
+            'event_count': event_count,
+            'seed_elevators': 0,
+            'seed_events': 0,
+            'report_path': report_rel,
+            'error': '',
+            'message': f'当前在册 {elevator_count} 部电梯、{event_count} 条工作记录。',
+        }
+
+    if report and report.get('committed') is False:
+        err = _sanitize_seed_error(report.get('error') or '无法读取或写入初始台账')
+        return {
+            'status': 'failed',
+            'committed': False,
+            'elevator_count': 0,
+            'event_count': 0,
+            'seed_elevators': 0,
+            'seed_events': 0,
+            'report_path': report_rel,
+            'error': err,
+            'message': f'预置台账尚未成功导入（{err}）。请查看数据目录下的 {report_rel}，处理后重新打开程序将自动重试。',
+        }
+    if _find_seed_ledger_path() is not None:
+        return {
+            'status': 'pending',
+            'committed': False,
+            'elevator_count': 0,
+            'event_count': 0,
+            'seed_elevators': 0,
+            'seed_events': 0,
+            'report_path': report_rel,
+            'error': '检测到预置台账尚未导入',
+            'message': f'检测到预置台账尚未导入，请重新打开程序自动建账；若仍未导入，请查看数据目录下的 {report_rel}。',
+        }
+    return {
+        'status': 'missing',
+        'committed': False,
+        'elevator_count': 0,
+        'event_count': 0,
+        'seed_elevators': 0,
+        'seed_events': 0,
+        'report_path': report_rel,
+        'error': '未检测到随包预置台账',
+        'message': (
+            f'当前尚未导入预置台账。若使用内部建账安装包，请查看数据目录下的 {report_rel} '
+            '并重新打开程序重试；也可在“电梯档案”中新增或导入档案。'
+        ),
+    }
+
+
+@app.get('/api/seed-status')
+def get_seed_status(user=Depends(actor)):
+    with connect() as db:
+        db.execute('BEGIN')
+        return seed_status_data(db)
+
+
 def seed_empty_ledger(user):
+    encoded = None
     try:
         with connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            if (db.execute("SELECT 1 FROM system_settings WHERE key='official_ledger_imported'").fetchone()
-                    or db.execute('SELECT 1 FROM elevators LIMIT 1').fetchone()):
+            if db.execute('SELECT 1 FROM elevators LIMIT 1').fetchone():
                 return
-            configured = Path(os.environ.get('ELEVATOR_SEED_LEDGER', ''))
-            paths = [configured] if configured.is_absolute() else []
-            paths.extend([ROOT / 'seed/official-ledger.xlsx', DATA / 'seed/official-ledger.xlsx'])
-            path = next((p for p in paths if p.is_file()), None)
+            path = _find_seed_ledger_path()
             if path is None:
+                db.execute("DELETE FROM system_settings WHERE key='official_ledger_imported'")
                 return
             with path.open('rb') as stream:
                 raw = stream.read(MAX_LEDGER + 1)
@@ -409,20 +529,35 @@ def seed_empty_ledger(user):
             if not isinstance(workbook, OfficialWorkbook):
                 raise ValueError('初始台账须使用正式双表格式')
             report = reconcile(db, workbook, user, insert_official_elevator, insert_event)
+            if not db.execute('SELECT 1 FROM elevators LIMIT 1').fetchone():
+                raise ValueError('初始台账未包含有效电梯档案')
             audit_import(db, user, '正式特种设备台账', report['added'], report['events_added'], len(report['unmatched']))
             summary = {key: report[key] for key in ('added', 'skipped', 'events_added', 'events_skipped',
                                                      'templates_skipped', 'warnings', 'unmatched')}
             summary['committed'] = True
             encoded = json.dumps(summary, ensure_ascii=False, indent=2)
-            db.execute("INSERT INTO system_settings(key,value) VALUES('official_ledger_imported',?)", (encoded,))
+            db.execute(
+                "INSERT INTO system_settings(key,value) VALUES('official_ledger_imported',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (encoded,),
+            )
     except Exception as exc:
-        # Keep the workspace available and retry on the next startup.
-        detail = exc.detail if isinstance(exc, HTTPException) else str(exc) if isinstance(exc, ValueError) else '无法读取或写入初始台账'
+        # Keep the workspace available and retry on the next startup whenever the elevator table is empty.
+        raw_detail = exc.detail if isinstance(exc, HTTPException) else str(exc) if isinstance(exc, ValueError) else '无法读取或写入初始台账'
+        detail = _sanitize_seed_error(raw_detail)
         encoded = json.dumps({'committed': False, 'error': detail}, ensure_ascii=False)
-    try:
-        (LOGS / 'seed-import-report.json').write_text(encoded, encoding='utf-8')
-    except OSError:
-        logging.exception('无法写入初始台账导入报告')
+        try:
+            with connect() as cleanup_db:
+                cleanup_db.execute('BEGIN IMMEDIATE')
+                if not cleanup_db.execute('SELECT 1 FROM elevators LIMIT 1').fetchone():
+                    cleanup_db.execute("DELETE FROM system_settings WHERE key='official_ledger_imported'")
+        except sqlite3.Error:
+            logging.exception('无法清理失败的初始台账导入标记')
+    if encoded is not None:
+        try:
+            (LOGS / 'seed-import-report.json').write_text(encoded, encoding='utf-8')
+        except OSError:
+            logging.exception('无法写入初始台账导入报告')
 
 
 @app.post('/api/elevator-archives/import')
@@ -1113,7 +1248,7 @@ def dashboard(user=Depends(actor)):
            WHERE v.deleted_at IS NULL AND e.deleted_at IS NULL ORDER BY v.occurred_on DESC,v.id DESC LIMIT 15"""))
         upcoming = reminders_data(db)
         _, labels = active_elevator_labels(db) if recent or upcoming else ({}, {})
-        return {"stats": stats, "reminders": add_elevator_labels(upcoming, labels), "recent": add_elevator_labels(recent, labels)}
+        return {"stats": stats, "reminders": add_elevator_labels(upcoming, labels), "recent": add_elevator_labels(recent, labels), "seed_status": seed_status_data(db)}
 
 
 @app.get("/api/costs")
