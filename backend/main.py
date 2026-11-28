@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import mimetypes
+import os
 import re
 import secrets
 import sqlite3
@@ -24,7 +25,8 @@ from PIL import Image
 
 from .db import BACKUPS, COMMUNITY, DB, EXPORTS, LOGS, ROOT, STORAGE, audit, connect, get_one, init_db, must_exist, now, password_hash, rows, verify_password
 from .exporter import get_data, make_export
-from .drafts import draft_detail, draft_metadata, initial_blocks, make_draft_export, source_attachments, source_status
+from .drafts import (DRAFT_PHOTO_FOLDER, draft_detail, draft_metadata, draft_photo_path, draft_photos,
+                     initial_blocks, make_draft_export, source_attachments, source_status)
 from .backup import create_backup
 from .archive_excel import workbook_bytes, read_records
 from .location import active_elevator_labels, add_elevator_labels, archive_number
@@ -39,6 +41,8 @@ STATUSES = {"正常", "故障", "维修中", "停梯", "待处理"}
 CATEGORIES = {"工作现场照片", "维修记录", "维保记录", "报价单", "业主签字单", "检测报告", "验收资料", "其他"}
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf", ".doc", ".docx", ".xls", ".xlsx"}
 MAX_UPLOAD = 20 * 1024 * 1024
+PHOTO_FORMATS = {'.jpg': 'JPEG', '.jpeg': 'JPEG', '.png': 'PNG', '.webp': 'WEBP'}
+MAX_DRAFT_UPLOAD = 100 * 1024 * 1024
 
 
 @app.exception_handler(RequestValidationError)
@@ -592,7 +596,9 @@ def elevator(elevator_id: int, user=Depends(actor)):
         if not item:
             error("找不到这部电梯", 404)
         item["community"] = COMMUNITY
-        item["total_cost_cents"] = db.execute("SELECT COALESCE(SUM(cost_cents),0) FROM events WHERE elevator_id=? AND deleted_at IS NULL", (elevator_id,)).fetchone()[0]
+        item.update(db.execute("""SELECT COALESCE(SUM(cost_cents),0) AS total_cost_cents,
+            COALESCE(SUM(maintenance_fund_cents),0) AS total_maintenance_fund_cents
+            FROM events WHERE elevator_id=? AND deleted_at IS NULL""", (elevator_id,)).fetchone())
         return item
 
 
@@ -662,6 +668,18 @@ def event_values(data):
                   occurred_on=day(data.get("occurred_on"), "工作日期", True),
                   cost_cents=money(data.get("cost_yuan") if data.get("cost_yuan") not in (None, "") else 0), completed=flag(data.get("completed", True), "完成情况"),
                   stopped=flag(data.get("stopped", False), "是否停梯"), recovered=flag(data.get("recovered", False), "是否恢复正常"))
+    if "uses_maintenance_fund" in data or "maintenance_fund_yuan" in data:
+        uses_fund = flag(data.get("uses_maintenance_fund", False), "是否动用住宅维修资金")
+        amount = data.get("maintenance_fund_yuan")
+        if uses_fund:
+            cents = money(amount if amount != "" else None)
+            if cents == 0:
+                error("请填写大于0的住宅维修基金金额")
+            values["maintenance_fund_cents"] = cents
+        else:
+            if amount not in (None, ""):
+                error("请先勾选动用住宅维修资金，再填写住宅维修基金金额")
+            values["maintenance_fund_cents"] = None
     for field in ("started_at", "ended_at", "fault_at", "reported_at", "arrived_at", "restored_at"):
         if values[field]:
             try:
@@ -696,6 +714,21 @@ def part_values(part, occurred_on):
                 notes=optional_text(part.get("notes"), 1000))
 
 
+def event_parts(data, values):
+    parts = data.get("parts") or []
+    if not isinstance(parts, list) or len(parts) > 30:
+        error("配件数量不正确")
+    if not parts and (values["type"] == "配件更换" or values.get("maintenance_fund_cents") is not None):
+        error("配件更换记录至少需要填写一个配件")
+    parsed = [part_values(part, values["occurred_on"]) for part in parts]
+    total = sum(part["quantity"] * part["unit_price_cents"] for part in parsed)
+    if total > 10_000_000_000:
+        error("本次配件合计不能超过一亿元")
+    if values["cost_auto"]:
+        values["cost_cents"] = total
+    return parsed
+
+
 def event_full(db, event_id):
     item = get_one(db, """SELECT v.*, e.name elevator_name,u.name unit_name,b.name building_name
         FROM events v JOIN elevators e ON e.id=v.elevator_id JOIN units u ON u.id=e.unit_id
@@ -704,6 +737,8 @@ def event_full(db, event_id):
     if item:
         for field in ("completed", "stopped", "recovered"):
             item[field] = bool(item[field])
+        item["uses_maintenance_fund"] = item["maintenance_fund_cents"] is not None
+        item["maintenance_fund_yuan"] = item["maintenance_fund_cents"] / 100 if item["uses_maintenance_fund"] else None
         item["parts"] = rows(db.execute("SELECT * FROM event_parts WHERE event_id=? ORDER BY id", (event_id,)))
         for part in item["parts"]:
             part["total_price_cents"] = part["quantity"] * part["unit_price_cents"]
@@ -761,16 +796,7 @@ def update_record_status(db, data, elevator_id, user, event_id):
 @app.post("/api/events")
 def add_event(data: dict = Body(...), user=Depends(actor)):
     values = event_values(data)
-    parts = data.get("parts") or []
-    if not isinstance(parts, list) or len(parts) > 30:
-        error("配件数量不正确")
-    if values["type"] == "配件更换" and not parts:
-        error("配件更换记录至少需要填写一个配件")
-    parsed_parts = [part_values(p, values["occurred_on"]) for p in parts]
-    if sum(part["quantity"] * part["unit_price_cents"] for part in parsed_parts) > 10_000_000_000:
-        error("本次配件合计不能超过一亿元")
-    if data.get("cost_yuan") is None or data.get("cost_yuan") == "":
-        values["cost_cents"] = sum(part["quantity"] * part["unit_price_cents"] for part in parsed_parts)
+    parsed_parts = event_parts(data, values)
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         if not must_exist(db, "elevators", positive_int(data.get("elevator_id"), "电梯", 1)):
@@ -791,16 +817,7 @@ def add_event(data: dict = Body(...), user=Depends(actor)):
 @app.put("/api/events/{event_id}")
 def edit_event(event_id: int, data: dict = Body(...), user=Depends(actor)):
     values = event_values(data)
-    parts = data.get("parts") or []
-    if not isinstance(parts, list) or len(parts) > 30:
-        error("配件数量不正确")
-    if values["type"] == "配件更换" and not parts:
-        error("配件更换记录至少需要填写一个配件")
-    parsed_parts = [part_values(p, values["occurred_on"]) for p in parts]
-    if sum(part["quantity"] * part["unit_price_cents"] for part in parsed_parts) > 10_000_000_000:
-        error("本次配件合计不能超过一亿元")
-    if data.get("cost_yuan") is None or data.get("cost_yuan") == "":
-        values["cost_cents"] = sum(part["quantity"] * part["unit_price_cents"] for part in parsed_parts)
+    parsed_parts = event_parts(data, values)
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         before = event_full(db, event_id)
@@ -810,6 +827,8 @@ def edit_event(event_id: int, data: dict = Body(...), user=Depends(actor)):
             error("只能修改自己创建的记录", 403)
         if data.get("updated_at") and data["updated_at"] != before["updated_at"]:
             error("这条记录刚被其他人修改，请重新打开后再编辑", 409)
+        if not parsed_parts and values.get("maintenance_fund_cents", before["maintenance_fund_cents"]) is not None:
+            error("清空配件前请取消动用住宅维修资金")
         values["updated_at"] = now()
         db.execute(f"UPDATE events SET {','.join(f'{k}=?' for k in values)} WHERE id=?", (*values.values(), event_id))
         db.execute("DELETE FROM event_parts WHERE event_id=?", (event_id,))
@@ -885,6 +904,53 @@ def checked_upload_target(relative):
     if not parent.is_relative_to(root) or not target.is_relative_to(root):
         error("附件存储路径超出存储目录，请联系管理员", 400)
     return target
+
+
+def photo_library_records(db, elevator_id, event_id=None, limit=None, offset=0):
+    args = []
+    sql = """SELECT v.id,v.elevator_id,v.title,v.type,v.occurred_on
+        FROM events v JOIN elevators e ON e.id=v.elevator_id JOIN units u ON u.id=e.unit_id
+        JOIN buildings b ON b.id=u.building_id WHERE v.deleted_at IS NULL AND e.deleted_at IS NULL
+        AND u.deleted_at IS NULL AND b.deleted_at IS NULL AND EXISTS (
+          SELECT 1 FROM attachments a WHERE a.event_id=v.id AND a.elevator_id=v.elevator_id
+          AND a.deleted_at IS NULL AND a.relative_path LIKE 'photos/%')"""
+    for clause, value in (("v.elevator_id=?", elevator_id), ("v.id=?", event_id)):
+        if value is not None:
+            sql += " AND " + clause
+            args.append(value)
+    sql += " ORDER BY v.occurred_on DESC,v.id DESC"
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        args.extend((limit, offset))
+    return rows(db.execute(sql, args))
+
+
+@app.get('/api/photo-library/records')
+def list_photo_records(elevator_id: Optional[int] = None, user=Depends(actor)):
+    with connect() as db:
+        return photo_library_records(db, elevator_id)
+
+
+@app.get('/api/photo-library')
+def photo_library(elevator_id: Optional[int] = None, event_id: Optional[int] = None, offset: int = 0, user=Depends(actor)):
+    limit = 20
+    with connect() as db:
+        db.execute('BEGIN')
+        records = photo_library_records(db, elevator_id, event_id, limit + 1, max(0, min(offset, 1_000_000)))
+        page = records[:limit]
+        if page:
+            _, labels = active_elevator_labels(db)
+            add_elevator_labels(page, labels)
+            ids = {record['id']: record for record in page}
+            for record in page:
+                record['photos'] = []
+            placeholders = ','.join('?' for _ in ids)
+            for photo in rows(db.execute(f"""SELECT a.id,a.event_id,a.original_name,a.category
+                FROM attachments a JOIN events v ON v.id=a.event_id AND v.elevator_id=a.elevator_id
+                WHERE a.event_id IN ({placeholders}) AND a.deleted_at IS NULL AND a.relative_path LIKE 'photos/%'
+                ORDER BY a.sort_order,a.created_at,a.id""", tuple(ids))):
+                ids[photo['event_id']]['photos'].append(photo)
+    return {'records': page, 'has_more': len(records) > limit}
 
 
 @app.post("/api/events/{event_id}/attachments")
@@ -1098,7 +1164,8 @@ def costs(building_id: Optional[int] = None, unit_id: Optional[int] = None, elev
     start = day(start); end = day(end)
     if start and end and start > end:
         error("开始日期不能晚于结束日期")
-    sql = """SELECT COALESCE(SUM(v.cost_cents),0) cost_cents,COUNT(*) record_count FROM events v
+    sql = """SELECT COALESCE(SUM(v.cost_cents),0) cost_cents,
+      COALESCE(SUM(v.maintenance_fund_cents),0) maintenance_fund_cents,COUNT(*) record_count FROM events v
       JOIN elevators e ON e.id=v.elevator_id JOIN units u ON u.id=e.unit_id WHERE v.deleted_at IS NULL AND e.deleted_at IS NULL"""
     args = []
     for clause, value in (("v.type=?", type if type != "全部" else None), ("u.building_id=?", building_id), ("u.id=?", unit_id), ("v.elevator_id=?", elevator_id),
@@ -1267,11 +1334,12 @@ def export_draft_row(db, draft_id, user):
     return item
 
 
-def draft_blocks(value, source):
+def draft_blocks(value, source, uploads=()):
     if not isinstance(value, list) or len(value) > 5000:
         error('文稿最多包含5000个内容块，请缩小来源范围')
     pictures = {attachment['id'] for _, _, attachment in source_attachments(source)
                 if attachment['relative_path'].startswith('photos/')}
+    pictures.update(uploads)
     blocks, ids, used_pictures = [], set(), set()
     for block in value:
         if not isinstance(block, dict):
@@ -1286,7 +1354,7 @@ def draft_blocks(value, source):
         elif kind == 'image':
             attachment_id = block.get('attachment_id')
             if not isinstance(attachment_id, str) or attachment_id not in pictures:
-                error('只能插入这份文稿来源记录中的照片')
+                error('只能插入这份文稿的来源照片或本稿上传的照片')
             if attachment_id in used_pictures:
                 error('同一张照片不能重复插入正文')
             used_pictures.add(attachment_id)
@@ -1347,33 +1415,119 @@ def list_export_drafts(user=Depends(actor)):
 @app.get('/api/export-drafts/{draft_id}')
 def get_export_draft(draft_id: int, user=Depends(actor)):
     with connect() as db:
+        db.execute('BEGIN')
         item = export_draft_row(db, draft_id, user)
-    return draft_detail(item)
+        uploads = draft_photos(db, draft_id)
+    return draft_detail(item, uploads)
 
 
 @app.put('/api/export-drafts/{draft_id}')
 def save_export_draft(draft_id: int, data: dict = Body(...), user=Depends(actor)):
+    return persist_export_draft(draft_id, data, user)
+
+
+@app.post('/api/export-drafts/{draft_id}/save-with-photos')
+def save_export_draft_with_photos(draft_id: int, payload: UploadFile = File(...), photos: list[UploadFile] = File(...), user=Depends(actor)):
+    # Each block may contain 10,000 characters, each JSON-escaped into at most six bytes.
+    if payload.size is not None and payload.size > 302_000_000:
+        error('文稿内容过大，请缩小来源范围')
+    try:
+        data = json.load(payload.file)
+    except (TypeError, ValueError, RecursionError):
+        error('文稿内容格式不正确')
+    if not isinstance(data, dict):
+        error('文稿内容格式不正确')
+    ids = data.get('photo_ids')
+    if not isinstance(ids, list) or len(ids) != len(photos) or len(ids) > 50 or any(
+            not isinstance(photo_id, str) or not re.fullmatch(r'upload-[A-Za-z0-9_-]{1,57}', photo_id) for photo_id in ids
+    ) or len(set(ids)) != len(ids):
+        error('每次最多添加50张照片，且照片编号不能重复')
+    return persist_export_draft(draft_id, data, user, dict(zip(ids, photos)))
+
+
+def save_draft_photos(db, draft_id, user, photos, written):
+    total = 0
+    for photo_id, file in photos.items():
+        original = (file.filename or '').replace('\\', '/').split('/')[-1].strip()
+        if not original or len(original) > 200 or any(ord(char) < 32 for char in original):
+            error('文件名无效')
+        ext = Path(original).suffix.lower()
+        if ext not in PHOTO_FORMATS:
+            error('文稿照片仅支持 JPG、PNG、WebP 格式')
+        raw = file.file.read(MAX_UPLOAD + 1)
+        if not raw or len(raw) > MAX_UPLOAD:
+            error('每张照片不能为空，且不能超过20 MB')
+        total += len(raw)
+        if total > MAX_DRAFT_UPLOAD:
+            error('每次保存的新增照片合计不能超过100 MB，请分次添加')
+        validate_file(raw, ext)
+        try:
+            with Image.open(io.BytesIO(raw), formats=[PHOTO_FORMATS[ext]]) as image:
+                image.load()
+        except (OSError, ValueError, SyntaxError):
+            error(f'照片无法读取或格式与文件名不符：{original}')
+        relative = Path(DRAFT_PHOTO_FOLDER) / f'{uuid.uuid4().hex}{ext}'
+        target = checked_upload_target(relative)
+        if target != STORAGE.resolve() / relative:
+            error('文稿照片存储路径无效，请联系管理员')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open('xb') as output:
+            written.append(target)
+            output.write(raw)
+            output.flush()
+            os.fsync(output.fileno())
+        db.execute('''INSERT INTO draft_photos(draft_id,id,original_name,relative_path,mime_type,size,uploaded_by,created_at)
+            VALUES(?,?,?,?,?,?,?,?)''', (draft_id, photo_id, original, relative.as_posix(),
+                                        Image.MIME[PHOTO_FORMATS[ext]], len(raw), user['id'], now()))
+
+
+def persist_export_draft(draft_id, data, user, photos=None):
+    photos = photos or {}
     title = require_text(data.get('title'), '文稿标题', 200)
     revision = positive_int(data.get('revision'), '文稿版本', 1)
-    with connect() as db:
-        db.execute('BEGIN IMMEDIATE')
-        before = export_draft_row(db, draft_id, user)
-        blocks = draft_blocks(data.get('blocks'), json.loads(before['source_json']))
-        cursor = db.execute('''UPDATE export_drafts SET title=?,blocks_json=?,revision=revision+1,updated_at=?,
-            docx_name=NULL,zip_name=NULL WHERE id=? AND revision=?''',
-            (title, json.dumps(blocks, ensure_ascii=False), now(), draft_id, revision))
-        if cursor.rowcount != 1:
-            error('这份文稿刚被其他人修改，当前编辑内容已保留；请先重新打开最新版本', 409)
-        audit(db, user['id'], '修改', '工作文稿', draft_id,
-              before={'title': before['title'], 'revision': before['revision']}, after={'title': title, 'revision': revision + 1})
-        item = export_draft_row(db, draft_id, user)
-    return draft_detail(item)
+    written = []
+    try:
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            before = export_draft_row(db, draft_id, user)
+            if revision != before['revision']:
+                error('这份文稿刚被其他人修改，当前编辑内容已保留；请先重新打开最新版本', 409)
+            owned = {photo['id'] for photo in draft_photos(db, draft_id)}
+            if owned.intersection(photos):
+                error('文稿已存在同名照片编号，请重新添加')
+            blocks = draft_blocks(data.get('blocks'), json.loads(before['source_json']), owned.union(photos))
+            if set(photos).difference(block['attachment_id'] for block in blocks if block['type'] == 'image'):
+                error('新增照片必须放在文稿中')
+            save_draft_photos(db, draft_id, user, photos, written)
+            db.execute('''UPDATE export_drafts SET title=?,blocks_json=?,revision=revision+1,updated_at=?,
+                docx_name=NULL,zip_name=NULL WHERE id=?''', (title, json.dumps(blocks, ensure_ascii=False), now(), draft_id))
+            audit(db, user['id'], '修改', '工作文稿', draft_id,
+                  before={'title': before['title'], 'revision': before['revision']},
+                  after={'title': title, 'revision': revision + 1, 'photos_added': len(photos)})
+            item = export_draft_row(db, draft_id, user)
+            uploads = draft_photos(db, draft_id)
+    except Exception:
+        for target in written:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                logging.exception('本次未保存的文稿照片清理失败')
+        raise
+    return draft_detail(item, uploads)
 
 
 @app.get('/api/export-drafts/{draft_id}/images/{attachment_id}')
-def export_draft_image(draft_id: int, attachment_id: str, user=Depends(actor)):
+def export_draft_image(draft_id: int, attachment_id: str, download: bool = False, user=Depends(actor)):
     with connect() as db:
         item = export_draft_row(db, draft_id, user)
+        photo = get_one(db, 'SELECT * FROM draft_photos WHERE draft_id=? AND id=?', (draft_id, attachment_id))
+    if photo:
+        target = draft_photo_path(photo)
+        if target is None:
+            error('文稿原图缺失或文件无效', 404)
+        return FileResponse(target, media_type=photo['mime_type'], filename=photo['original_name'],
+                            content_disposition_type='attachment' if download else 'inline',
+                            headers={'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store'})
     source = json.loads(item['source_json'])
     selected = next(((e, v, a) for e, v, a in source_attachments(source) if a['id'] == attachment_id
                      and a['relative_path'].startswith('photos/')), None)
@@ -1393,11 +1547,13 @@ def prepare_export_draft(draft_id: int, data: dict = Body(...), user=Depends(act
     package = bool(flag(data.get('package', False), '完整档案包'))
     directory = bool(flag(data.get('directory', True), '附件目录'))
     with connect() as db:
+        db.execute('BEGIN')
         item = export_draft_row(db, draft_id, user)
+        uploads = draft_photos(db, draft_id)
     if revision != item['revision']:
         error('文稿版本已变化，请先保存或重新打开最新版本', 409)
     try:
-        docx_path, zip_path, filename = make_draft_export(item, package, directory)
+        docx_path, zip_path, filename = make_draft_export(item, package, directory, uploads)
     except ValueError as exc:
         error(str(exc))
     except Exception:
