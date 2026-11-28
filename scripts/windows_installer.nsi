@@ -47,7 +47,7 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "昌福里社区27区党群物业服
 !define MUI_CUSTOMFUNCTION_ABORT InstallerAbort
 !define MUI_CUSTOMFUNCTION_UNABORT un.InstallerAbort
 !define MUI_WELCOMEPAGE_TEXT "本程序为同一台主机安装一套电梯管理台账。$\r$\n$\r$\n安装需要管理员授权，日常使用无需管理员权限。台账数据存放在 ProgramData，升级和卸载会保留数据。$\r$\n$\r$\n请先备份已有台账，并关闭正在编辑的工作页面。"
-!define MUI_FINISHPAGE_TEXT "安装已完成。$\r$\n$\r$\n请以普通用户身份双击桌面的“昌福里社区电梯管理系统”，打开桌面应用窗口。首次启动后按提示设置管理员账号。$\r$\n$\r$\n关闭主机窗口会停止服务。局域网访问期间请保持窗口打开。停止系统、打开数据目录和卸载入口位于开始菜单。"
+!define MUI_FINISHPAGE_TEXT "安装已完成。$\r$\n$\r$\n请以普通用户身份双击桌面的“昌福里社区电梯管理系统”，打开桌面应用窗口。打开后即可直接进入工作台，无需登录。若安装包预置了台账，首次启动会自动建账。$\r$\n$\r$\n关闭主机窗口会停止服务。局域网访问期间请保持窗口打开。停止系统、打开数据目录和卸载入口位于开始菜单。"
 !define MUI_UNCONFIRMPAGE_TEXT_TOP "卸载将停止本机系统并删除程序。ProgramData 中的台账、附件、备份及日志会保留。"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_INSTFILES
