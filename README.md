@@ -4,7 +4,7 @@
 
 ## Windows 安装版
 
-普通用户使用 EXE 安装包，安装后双击桌面“昌福里社区电梯管理系统”。运行环境与页面已内置，无需另装 Python、Node 或数据库，安装及使用无需联网。首次打开网页时自行设置管理员账号与密码，没有固定默认密码。
+安装 EXE 后，双击桌面“昌福里社区电梯管理系统”即可打开主机上的桌面窗口，首次使用按提示设置管理员账号与密码。安装包内置 Python 和页面，桌面窗口需要 Microsoft Edge WebView2 Runtime。其他电脑或手机访问台账期间，请保持主机应用打开。关闭桌面窗口会停止主机服务。
 
 安装、停止、升级和换电脑步骤见 [Windows 安装版使用说明](docs/WINDOWS_INSTALLER.md)。安装版把资料保存在 `C:\ProgramData\ChangfuliElevatorLedger`（以系统 ProgramData 实际位置为准），与程序目录分开；卸载程序保留资料。下文 BAT 和开发命令仅适用于源码版。
 

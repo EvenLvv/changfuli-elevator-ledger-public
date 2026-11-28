@@ -1,6 +1,8 @@
 """Installed Windows entry point. Keep application files separate from shared business data."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import ctypes
+from ctypes import wintypes
 import errno
 import hashlib
 import hmac
@@ -19,9 +21,10 @@ import sys
 import threading
 import time
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
-import webbrowser
 
 APP_ID = 'ChangfuliElevatorLedger'
+WINDOW_TITLE = '昌福里社区电梯管理系统'
+WEBVIEW2_ERROR = '无法打开桌面窗口。请安装或修复 Microsoft Edge WebView2 Runtime，然后重新打开电梯管理系统。'
 PORT = 8765
 START_TIMEOUT = 45
 STOP_TIMEOUT = 45
@@ -82,6 +85,12 @@ def check_installation(program_root, data_root):
         raise RuntimeError('运行环境需要安装包内的 Python 3.12 64位版本。')
     for name in ('fastapi', 'uvicorn', 'docx', 'PIL.Image', 'qrcode', 'multipart', 'openpyxl'):
         importlib.import_module(name)
+    if os.name == 'nt':
+        try:
+            importlib.import_module('webview')
+            importlib.import_module('clr')
+        except Exception as exc:
+            raise RuntimeError('无法加载桌面窗口组件。请检查 .NET Framework 并重新安装完整程序。') from exc
     with sqlite3.connect(':memory:') as db:
         if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
             raise RuntimeError('SQLite 运行环境检查失败。')
@@ -219,16 +228,70 @@ def stop_instance(data_root, port=PORT, timeout=STOP_TIMEOUT):
     raise RuntimeError('电梯台账未能在45秒内安全停止。请等待正在进行的操作完成后重试；程序不会强制结束进程。')
 
 
-def run_server(program_root, data_root, port=PORT, open_browser=True, app=None):
+def activate_existing_window(pid, quiet=False):
+    user32 = ctypes.windll.user32
+    user32.FindWindowW.restype = wintypes.HWND
+    hwnd = wintypes.HWND(user32.FindWindowW(None, WINDOW_TITLE))
+    owner = wintypes.DWORD()
+    if hwnd and user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner)) and owner.value == pid:
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        if user32.SetForegroundWindow(hwnd):
+            return
+    if not quiet:
+        user32.MessageBoxW(None, '电梯管理系统已在运行。请切换到已打开的桌面窗口。', WINDOW_TITLE, 0x40)
+
+
+def open_operator_window(program_root, url, stopped):
+    import webview
+
+    icon = program_root / 'windows-app.ico'
+    if not icon.is_file():
+        icon = program_root / 'scripts/windows-app.ico'
+    webview.settings['ALLOW_DOWNLOADS'] = True
+    webview.settings['OPEN_EXTERNAL_LINKS_IN_BROWSER'] = False
+    window = webview.create_window(WINDOW_TITLE, url, width=1440, height=900, maximized=True, text_select=True)
+    initialization_failed = threading.Event()
+
+    def close_on_stop():
+        stopped.wait()
+        if not window.events.closed.is_set():
+            window.destroy()
+
+    def check_initialization(sender, args):
+        if args.IsSuccess:
+            # Keep Back, Find and Print available for ledger pages and opened photos.
+            sender.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = True
+            return
+        logging.error('WebView2 初始化失败：%s', args.InitializationException)
+        initialization_failed.set()
+        stopped.set()
+
+    def watch_initialization():
+        window.native.webview.CoreWebView2InitializationCompleted += check_initialization
+
+    # pywebview can select MSHTML when Edge is missing. Veto it before creating the form.
+    window.events.initialized += lambda renderer: renderer == 'edgechromium'
+    window.events.before_show += watch_initialization
+    window.events.shown += close_on_stop
+    try:
+        webview.start(gui='edgechromium', icon=str(icon), private_mode=False,
+                      storage_path=str(Path(os.environ['LOCALAPPDATA']) / APP_ID / 'WebView2'))
+    except Exception as exc:
+        raise RuntimeError(WEBVIEW2_ERROR) from exc
+    if webview.renderer != 'edgechromium' or initialization_failed.is_set():
+        raise RuntimeError(WEBVIEW2_ERROR)
+
+
+def run_server(program_root, data_root, port=PORT, app=None, quiet=False):
     lock = try_lock(data_root)
     if not lock:
-        wait_existing(data_root, port)
-        if open_browser:
-            webbrowser.open(f'http://127.0.0.1:{port}')
+        state = wait_existing(data_root, port)
+        activate_existing_window(state.get('pid'), quiet)
         return
     sock = None
-    state = {'app': APP_ID, 'port': port, 'secret': secrets.token_hex(32)}
-    cancel, ready, stopped = threading.Event(), threading.Event(), threading.Event()
+    state = {'app': APP_ID, 'pid': os.getpid(), 'port': port, 'secret': secrets.token_hex(32)}
+    stopped = threading.Event()
     try:
         if checked_data_path(data_root, 'maintenance.flag').exists():
             raise RuntimeError('电梯台账正在安装或维护，请完成操作后再启动。')
@@ -259,28 +322,25 @@ def run_server(program_root, data_root, port=PORT, open_browser=True, app=None):
         server = uvicorn.Server(uvicorn.Config(control, host='0.0.0.0', port=port, proxy_headers=False,
                                               log_config=None, access_log=False, timeout_graceful_shutdown=None))
 
-        def browser_when_ready():
-            deadline = time.monotonic() + START_TIMEOUT
-            while not cancel.is_set() and time.monotonic() < deadline:
-                if probe_instance(state):
-                    ready.set()
-                    if open_browser and not stopped.is_set():
-                        webbrowser.open(f'http://127.0.0.1:{port}')
-                    return
-                cancel.wait(0.1)
-            if not cancel.is_set():
-                server.should_exit = True
-
-        watcher = threading.Thread(target=browser_when_ready, daemon=True)
-        watcher.start()
         logging.info('安装版服务启动，端口%s，数据目录%s', port, data_root)
-        try:
-            server.run(sockets=[sock])
-        finally:
-            cancel.set()
-            watcher.join(timeout=3)
-        if not ready.is_set() and not stopped.is_set():
-            raise RuntimeError('电梯台账启动失败或就绪检查超时，请查看日志。')
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            host = worker.submit(server.run, sockets=[sock])
+            host.add_done_callback(lambda _: stopped.set())
+            try:
+                deadline = time.monotonic() + START_TIMEOUT
+                while not stopped.is_set():
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError('电梯台账就绪检查超时，请查看日志。')
+                    if probe_instance(state):
+                        if not stopped.is_set():
+                            open_operator_window(program_root, f'http://127.0.0.1:{port}', stopped)
+                        break
+                    stopped.wait(0.1)
+            finally:
+                request_stop()
+            host.result()
+            if not server.started:
+                raise RuntimeError('电梯台账启动失败，请查看日志。')
     finally:
         if sock:
             sock.close()
@@ -315,7 +375,7 @@ def main(argv=None):
             check_installation(program_root, data_root)
             logging.info('安装版运行环境检查通过')
         else:
-            run_server(program_root, data_root)
+            run_server(program_root, data_root, quiet=args.quiet)
         return 0
     except Exception as exc:
         logging.exception('安装版启动器失败')

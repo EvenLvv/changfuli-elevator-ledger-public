@@ -45,7 +45,9 @@ export ELEVATOR_LOG_DIR="$test_root/logs"
 克隆源码后先按上文安装依赖并构建前端。`wheelhouse/`、Python 嵌入运行库和 NSIS 不随 GitHub 源码上传，构建机另行准备：
 
 ```bash
-.venv/bin/python -m pip download --dest wheelhouse --platform win_amd64 --python-version 3.12 --implementation cp --abi cp312 --only-binary=:all: -r requirements.lock.txt
+# proxy_tools 仅发布源码包，先生成通用 wheel 供后续离线打包。
+.venv/bin/python -m pip wheel --no-deps --wheel-dir wheelhouse proxy_tools==0.1.0
+.venv/bin/python -m pip download --find-links wheelhouse --dest wheelhouse --platform win_amd64 --python-version 3.12 --implementation cp --abi cp312 --only-binary=:all: --no-deps -r requirements.lock.txt
 .venv/bin/python scripts/verify_offline.py
 ```
 

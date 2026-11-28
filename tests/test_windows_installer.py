@@ -53,6 +53,11 @@ class WindowsInstallerTest(unittest.TestCase):
             builder.selected_wheels(self.root, expected)
         wheel = self.wheel()
         self.assertEqual(builder.selected_wheels(self.root, expected), [wheel])
+        wheel = wheel.rename(self.root / 'demo-1.0-cp311.cp312.cp313-none-any.whl')
+        self.assertEqual(builder.selected_wheels(self.root, expected), [wheel])
+        wheel = wheel.rename(self.root / 'demo-1.0-cp311.cp313-none-any.whl')
+        with self.assertRaises(ValueError):
+            builder.selected_wheels(self.root, expected)
         wheel.rename(self.root / 'demo-1.0-cp312-cp312-macosx_11_0_arm64.whl')
         with self.assertRaises(ValueError):
             builder.selected_wheels(self.root, expected)

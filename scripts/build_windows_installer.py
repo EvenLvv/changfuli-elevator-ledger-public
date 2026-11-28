@@ -75,7 +75,10 @@ def selected_wheels(wheelhouse, requirements):
         name = re.sub(r'[-_.]+', '-', metadata['Name'] or '').lower()
         if name not in requirements or metadata['Version'] != requirements[name]:
             continue
-        if not re.search(r'-(?:py3|py2\.py3)-none-any\.whl$|-cp312-cp312-win_amd64\.whl$', wheel.name):
+        _, python_tag, abi, platform = wheel.stem.rsplit('-', 3)
+        versions = python_tag.split('.')
+        portable = (abi, platform) == ('none', 'any') and ('py3' in versions or 'cp312' in versions)
+        if not portable and (python_tag, abi, platform) != ('cp312', 'cp312', 'win_amd64'):
             raise ValueError(f'Expected a Python 3.12 Windows x64 or pure Python wheel: {wheel.name}')
         if name in selected:
             raise ValueError(f'Multiple matching wheels for {name}; use a clean wheelhouse')
