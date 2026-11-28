@@ -60,3 +60,8 @@ htmlcov/
 
 # Legacy third-party visual reference is excluded from public source
 /frontend/src/assets/architecture.jpg
+
+# Optional private first-run workbook
+/seed/*.xlsx
+
+/.fix-notes/

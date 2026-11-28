@@ -4,7 +4,8 @@ import io
 import re
 import uuid
 import zipfile
-from datetime import date
+from collections import Counter
+from datetime import date, datetime
 from decimal import Decimal
 
 from docx import Document
@@ -16,7 +17,8 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from PIL import Image, ImageOps
 
-from .db import COMMUNITY, EXPORTS, STORAGE, connect, rows
+from .db import COMMUNITY, EXPORTS, STORAGE, SHANGHAI, connect, rows
+from .location import elevator_label, export_elevator_label
 
 # Word/WPS use the reader's fonts, independent of the server operating system.
 FONT = "仿宋"
@@ -33,6 +35,25 @@ def yuan(cents):
     return f"{Decimal(cents) / 100:.2f}元"
 
 
+def event_cost_lines(event):
+    lines = []
+    if event.get('maintenance_fund_cents') is not None:
+        lines.append(f"住宅维修基金金额：{yuan(event['maintenance_fund_cents'])}")
+    elif event.get('uses_maintenance_fund'):
+        lines.append('已动用住宅维修资金，金额未登记')
+    if event['cost_cents'] or not event.get('cost_auto'):
+        label = '历史登记费用' if event['parts'] or event['type'] == '配件更换' else '一般登记费用'
+        lines.append(f"{label}：{yuan(event['cost_cents'])}")
+    return lines
+
+
+def historical_part_cost(part):
+    unit_price = part['unit_price_cents']
+    if unit_price:
+        return f"历史配件单价：{yuan(unit_price)}；历史配件合计：{yuan(part['quantity'] * unit_price)}"
+    return ''
+
+
 def friendly_date(value):
     if not value:
         return "未填写"
@@ -44,23 +65,28 @@ def get_data(scope, building_id, unit_id, elevator_id, start, end, event_type):
     ids = {"building": building_id, "unit": unit_id, "elevator": elevator_id}
     if scope != "all" and not ids[scope]:
         raise ValueError("请先选择导出范围")
-    sql = """SELECT e.*,u.name unit_name,u.building_id,b.name building_name FROM elevators e
+    sql = """FROM elevators e
       JOIN units u ON u.id=e.unit_id JOIN buildings b ON b.id=u.building_id
       WHERE e.deleted_at IS NULL AND u.deleted_at IS NULL AND b.deleted_at IS NULL"""
-    args = []
-    if scope == "building":
-        sql += " AND b.id=?"; args.append(building_id)
-    elif scope == "unit":
-        sql += " AND u.id=?"; args.append(unit_id)
-    elif scope == "elevator":
-        sql += " AND e.id=?"; args.append(elevator_id)
+    scope_column = {"building": "b.id", "unit": "u.id", "elevator": "e.id"}.get(scope)
+    scope_filter = f" AND {scope_column}=?" if scope_column else ""
+    args = (ids[scope],) if scope_column else ()
     with connect() as db:
         db.execute("BEGIN")
-        elevators = rows(db.execute(sql + " ORDER BY b.name,u.name,e.name,e.id", args))
+        fields = "SELECT e.*,u.name unit_name,u.building_id,b.name building_name "
+        elevators = rows(db.execute(fields + sql + scope_filter + " ORDER BY b.name,u.name,e.name,e.id", args))
         if not elevators:
             raise ValueError("范围内没有电梯")
+        # Count outside the selected scope so a single-elevator export also identifies its archive.
+        locations = db.execute("SELECT e.name,u.name unit_name,b.name building_name " + sql) if scope_column else elevators
+        counts = Counter(elevator_label(location) for location in locations)
         record_number = attachment_number = 0
         for elevator in elevators:
+            label = elevator_label(elevator)
+            elevator['export_label'] = label
+            if counts[label] > 1:
+                elevator['export_label'] = f"档案 {elevator['id']} · {label}"
+                elevator['export_label_conflict'] = True
             query = "SELECT * FROM events WHERE elevator_id=? AND deleted_at IS NULL"
             params = [elevator["id"]]
             if start:
@@ -226,9 +252,9 @@ def build_document(elevators, start, end, photos, directory):
     document = Document(); configure_document(document)
     all_events = [event for e in elevators for event in e["events"]]
     buildings = list(dict.fromkeys(e["building_name"] for e in elevators))
-    scope = (f"{elevators[0]['building_name']} {elevators[0]['unit_name']} {elevators[0]['name']}"
+    scope = (export_elevator_label(elevators[0])
              if len(elevators) == 1 else "、".join(buildings))
-    if len(scope) > 60:
+    if len(scope) > 60 and not (len(elevators) == 1 and elevators[0].get('export_label_conflict')):
         scope = f"{len(buildings)}栋楼  共{len(elevators)}部电梯"
     cover_line(document, COMMUNITY, 18, before=24, after=70, face="黑体")
     cover_line(document, "电梯工作记录档案", 22, after=28, face=TITLE_FONT, title=True)
@@ -247,7 +273,7 @@ def build_document(elevators, start, end, photos, directory):
     cover_line(document, period, after=30)
     cover_line(document, f"共 {len(elevators)} 部电梯，{len(all_events)} 条工作记录。", 14, after=50)
     cover_line(document, f"编制单位：{COMMUNITY}", 14)
-    cover_line(document, f"编制日期：{friendly_date(date.today().isoformat())}", 14)
+    cover_line(document, f"编制日期：{friendly_date(datetime.now(SHANGHAI).date().isoformat())}", 14)
     section = document.add_section(WD_SECTION_START.NEW_PAGE); add_page_numbers(document, section)
     add_heading(document, "编制说明")
     add_text(document, "本档案汇集所选范围和统计周期内的电梯基本资料、工作记录及相关附件，供工作检查、资料查阅和归档留存使用。")
@@ -256,16 +282,16 @@ def build_document(elevators, start, end, photos, directory):
     add_text(document, "费用、质保期限及完成情况以登记内容为依据。未填写项目以“—”表示。原始附件在完整档案包中保存，图片仅为排版缩放，保留原始比例及水印。")
     for index, elevator in enumerate(elevators, 1):
         document.add_page_break()
-        lift_label = f"{elevator['building_name']} {elevator['unit_name']} {elevator['name']}"
+        lift_label = export_elevator_label(elevator)
         add_heading(document, f"第{index}部电梯  {lift_label}"); add_heading(document, "（一）电梯基本情况", 2)
         pairs = [("所属小区", COMMUNITY), ("当前状态", elevator["status"]),
                  ("楼栋", elevator["building_name"]), ("单元", elevator["unit_name"]),
                  ("电梯", elevator["name"]), ("内部编号", elevator["internal_number"]),
-                 ("设备编号", elevator["equipment_number"]), ("品牌", elevator["brand"]),
-                 ("型号", elevator["model"]), ("出厂日期", elevator["manufactured_on"]),
-                 ("投用日期", elevator["started_on"]), ("维保单位", elevator["maintenance_company"]),
-                 ("维保联系人", elevator["maintenance_contact"]), ("联系电话", elevator["maintenance_phone"]),
-                 ("下次维保", elevator["maintenance_due_on"]), ("下次年检", elevator["inspection_on"])]
+                 ("使用登记证号", elevator["equipment_number"]), ("品牌", elevator["brand"]),
+                 ("设备型号", elevator["model"]), ("出厂日期", elevator["manufactured_on"]),
+                 ("投入使用时间", elevator["started_on"]), ("维保单位", elevator["maintenance_company"]),
+                 ("维保人姓名", elevator["maintenance_contact"]), ("维保联系人电话", elevator["maintenance_phone"]),
+                 ("下次维保", elevator["maintenance_due_on"]), ("年检日期", elevator["inspection_on"])]
         add_table(document, ["项目", "内容", "项目", "内容"],
                   [(pairs[i][0], pairs[i][1], pairs[i+1][0], pairs[i+1][1]) for i in range(0, len(pairs), 2)], [2.6, 5.2, 2.6, 5.2])
         if elevator["notes"]:
@@ -276,9 +302,13 @@ def build_document(elevators, start, end, photos, directory):
         if not elevator["events"]:
             add_text(document, "所选时间段暂无工作记录。"); continue
         records = [(f"记录{e['record_number']}", e["occurred_on"], e["type"], e["title"],
-                    "、".join(f"{p['name']}×{p['quantity']}" for p in e["parts"]) or "—", yuan(e["cost_cents"])) for e in elevator["events"]]
-        add_table(document, ["编号", "日期", "类型", "工作内容", "更换配件", "费用"], records, [1.5, 2.4, 1.8, 4.5, 3.0, 2.4])
-        add_text(document, f"本周期登记费用合计：{yuan(sum(e['cost_cents'] for e in elevator['events']))}")
+                    "、".join(f"{p['name']}×{p['quantity']}" for p in e["parts"]) or "—",
+                    "\n".join(event_cost_lines(e))) for e in elevator["events"]]
+        add_table(document, ["编号", "日期", "类型", "工作内容", "更换配件", "资金与费用"], records, [1.5, 2.4, 1.8, 4.1, 2.7, 3.1])
+        fund_total = sum(e.get('maintenance_fund_cents') or 0 for e in elevator['events'])
+        add_text(document, f"本周期住宅维修基金金额合计：{yuan(fund_total) if fund_total else '无金额记录'}")
+        if any(e['cost_cents'] or not e.get('cost_auto') for e in elevator['events']):
+            add_text(document, f"本周期一般登记费用合计：{yuan(sum(e['cost_cents'] for e in elevator['events']))}")
         for event in elevator["events"]:
             document.add_page_break(); number = event["record_number"]
             add_heading(document, f"记录{number}  {event['type']}")
@@ -300,14 +330,16 @@ def build_document(elevators, start, end, photos, directory):
                 for part in event["parts"]:
                     add_text(document, f"配件：{part['name']}；型号：{part['model'] or '—'}；数量：{part['quantity']}")
                     add_table(document, ["项目", "内容", "项目", "内容"], [
-                        ("更换日期", part['replaced_on'], "单价", yuan(part['unit_price_cents'])),
-                        ("配件合计", yuan(part['quantity'] * part['unit_price_cents']), "质保天数", f"{part['warranty_days']}天"),
+                        ("更换日期", part['replaced_on'], "质保天数", f"{part['warranty_days']}天"),
                         ("质保开始", part['warranty_from'] or part['replaced_on'], "质保截止", part['warranty_until'] or '未设置')
                     ], [2.6, 5.2, 2.6, 5.2])
+                    if cost := historical_part_cost(part):
+                        add_text(document, cost)
                     for key, label in (("reason", "更换原因"), ("brand", "厂家或品牌"), ("notes", "配件备注")):
                         if part[key]:
                             add_text(document, f"{label}：{part[key]}")
-            add_text(document, f"记录费用：{yuan(event['cost_cents'])}")
+            for cost in event_cost_lines(event):
+                add_text(document, cost)
             pictures = [a for a in event["attachments"] if a["relative_path"].startswith("photos/")]
             if photos:
                 for offset in range(0, len(pictures), 4):
@@ -338,7 +370,7 @@ def make_export(scope, building_id, unit_id, elevator_id, start, end, event_type
     label = "全部电梯" if scope == "all" else (
         elevators[0]["building_name"] if scope == "building" else
         elevators[0]["building_name"] + elevators[0]["unit_name"] if scope == "unit" else
-        elevators[0]["building_name"] + elevators[0]["unit_name"] + elevators[0]["name"])
+        export_elevator_label(elevators[0]))
     date_label = f"{(start or '不限').replace('-', '')}-{(end or '不限').replace('-', '')}"
     name = safe_name(f"{COMMUNITY}_{label}_{date_label}_电梯工作档案", 180)
     unique = uuid.uuid4().hex[:12]; docx_path = EXPORTS / f"{unique}_{name}.docx"
@@ -357,16 +389,18 @@ def make_export(scope, building_id, unit_id, elevator_id, start, end, event_type
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.write(docx_path, f"{name}.docx")
         for elevator in elevators:
+            original_place = f"{elevator['building_name']}{elevator['unit_name']}{elevator['name']}"
+            attachment_place = export_elevator_label(elevator)
+            folder = safe_name(attachment_place if elevator.get('export_label_conflict') else original_place, 60)
             for event in elevator["events"]:
                 for attachment in event["attachments"]:
                     path = STORAGE / attachment["relative_path"]
-                    folder = safe_name(f"{elevator['building_name']}{elevator['unit_name']}{elevator['name']}", 60)
                     filename = safe_name(attachment["original_name"], 70); reference = attachment["archive_reference"]
                     if attachment["relative_path"].startswith("photos/"):
                         filename = safe_name(attachment["category"], 30) + path.suffix
                     archive_name = f"附件/{folder}/{reference}_{filename}"
                     archive.write(path, archive_name)
-                    values = [reference, folder, f"记录{event['record_number']}", event["occurred_on"], attachment["category"], attachment["original_name"], archive_name]
+                    values = [reference, attachment_place, f"记录{event['record_number']}", event["occurred_on"], attachment["category"], attachment["original_name"], archive_name]
                     # Untrusted names must not become executable spreadsheet formulas.
                     writer.writerow(["'" + value if value.lstrip().startswith(("=", "+", "-", "@")) else value for value in values])
         archive.writestr("原始附件清单.csv", manifest.getvalue().encode("utf-8-sig"))

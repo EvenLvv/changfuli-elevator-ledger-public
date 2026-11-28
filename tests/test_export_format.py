@@ -14,8 +14,6 @@ class ExportFormatTest(unittest.TestCase):
         self.context = isolated_app()
         self.client, self.paths = self.context.__enter__()
         self.addCleanup(self.context.__exit__, None, None, None)
-        self.post('/api/setup', {'username':'admin','display_name':'管理员','password':'format-password-123'})
-        self.post('/api/login', {'username':'admin','password':'format-password-123'})
         self.lift = self.post('/api/elevators', {'building_name':'18栋','unit_name':'1单元','name':'1号梯'})['id']
 
     def post(self, url, data):
@@ -82,6 +80,8 @@ class ExportFormatTest(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
             manifest = list(csv.DictReader(io.StringIO(archive.read('原始附件清单.csv').decode('utf-8-sig'))))
             self.assertEqual([r['资料编号'] for r in manifest], ['图1-1','图1-2','图2-1'])
+            self.assertEqual({r['电梯'] for r in manifest}, {'18栋1口1号电梯'})
+            self.assertTrue(all(r['包内路径'].startswith('附件/18栋1单元1号梯/') for r in manifest))
             self.assertEqual(archive.read(manifest[0]['包内路径']), second_raw)
             self.assertEqual(archive.read(manifest[1]['包内路径']), first_raw)
             self.assertEqual(manifest[1]['原始文件名'], names[0])
@@ -90,18 +90,12 @@ class ExportFormatTest(unittest.TestCase):
         filtered = self.client.get('/api/export', params={'scope':'elevator','elevator_id':self.lift,'photos':False,'directory':False})
         self.assertEqual(len(Document(io.BytesIO(filtered.content)).inline_shapes),0)
 
-    def test_order_is_authorized_complete_and_migrates_old_schema(self):
+    def test_order_requires_complete_list_and_migrates_old_schema(self):
         event = self.event('处理顺序', '2026-09-30T09:00')
         first, _ = self.photo(event, '一.png', 'red'); second, _ = self.photo(event, '二.png', 'blue')
         endpoint = f'/api/events/{event}/attachment-order'
         for invalid in [None, [first], [first, first], [first, 'unknown'], [1, second]]:
             self.assertIn(self.client.put(endpoint,json={'ids':invalid}).status_code, [400,409])
-        self.post('/api/users',{'username':'staff','display_name':'工作人员','password':'format-staff-123','role':'staff'})
-        self.post('/api/logout', {})
-        self.assertEqual(self.client.put(endpoint,json={'ids':[second,first]}).status_code,401)
-        self.post('/api/login',{'username':'staff','password':'format-staff-123'})
-        self.assertEqual(self.client.put(endpoint,json={'ids':[second,first]}).status_code,403)
-        self.post('/api/login',{'username':'admin','password':'format-password-123'})
         self.assertEqual(self.client.put(endpoint,json={'ids':[second,first]}).status_code,200)
         self.assertEqual([a['id'] for a in self.client.get(f'/api/events/{event}').json()['attachments']],[second,first])
         self.assertTrue(any(a['target']=='附件顺序' for a in self.client.get('/api/audit').json()))

@@ -1,20 +1,27 @@
-"""Launcher checks use fake application files and temporary shared data, never the ledger."""
+"""Launcher checks use fake application files and temporary per-user data, never the live ledger."""
 import asyncio
-import io
+from contextlib import closing
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts import windows_launcher as launcher
+from tests.support import isolated_app
+
+FIXTURE_LEDGER = Path(__file__).resolve().parent / 'fixtures/synthetic-ledger-fixture.xlsx'
 
 
 class WindowsLauncherTest(unittest.TestCase):
@@ -23,8 +30,10 @@ class WindowsLauncherTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.program = self.root / 'program'
-        for relative, content in [('backend/__init__.py', ''), ('backend/db.py', '# fake database module'),
-                                  ('backend/main.py', '''import asyncio
+        for relative, content in [
+            ('backend/__init__.py', ''),
+            ('backend/db.py', '# fake database module'),
+            ('backend/main.py', '''import asyncio
 async def app(scope, receive, send):
  if scope['type']=='lifespan':
   while True:
@@ -38,13 +47,18 @@ async def app(scope, receive, send):
  else:
   await send({'type':'http.response.start','status':200,'headers':[(b'content-type',b'application/json')]})
   await send({'type':'http.response.body','body':b'{"ok":true}'})
-'''), ('frontend/dist/index.html', '<script src="/assets/app.js"></script>'),
-                                  ('frontend/dist/assets/app.js', '// fixture')]:
-            target = self.program / relative; target.parent.mkdir(parents=True, exist_ok=True)
+'''),
+            ('frontend/dist/index.html', '<script src="/assets/app.js"></script>'),
+            ('frontend/dist/assets/app.js', '// fixture'),
+        ]:
+            target = self.program / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding='utf-8')
         self.env = patch.dict(os.environ)
-        self.env.start(); self.addCleanup(self.env.stop)
-        self.data = launcher.configure_data_paths(self.root / 'ProgramData')
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        os.environ['PROGRAMDATA'] = str(self.root / 'ProgramData')
+        self.data = launcher.configure_data_paths(self.root / 'LocalAppData', program_root=self.program)
 
     @staticmethod
     def free_port():
@@ -52,33 +66,78 @@ async def app(scope, receive, send):
             sock.bind(('127.0.0.1', 0))
             return sock.getsockname()[1]
 
-    def test_shared_paths_replace_inherited_database_and_do_not_touch_program(self):
+    def test_identity_port_title_and_data_separation_from_instdir(self):
+        self.assertEqual(launcher.APP_ID, 'ChangfuliElevatorDesktop')
+        self.assertNotEqual(launcher.APP_ID, 'ChangfuliElevatorLedger')
+        self.assertEqual(launcher.PORT, 8766)
+        self.assertEqual(launcher.APP_VERSION, '2.0.3')
+        self.assertEqual(launcher.WINDOW_TITLE, '昌福里社区电梯管理系统')
+        self.assertNotEqual(launcher.LOCK_FILE, 'runtime-instance.lock')
+        self.assertNotEqual(launcher.STATE_FILE, 'runtime-instance.json')
+
         os.environ['ELEVATOR_DATA_DIR'] = str(self.root / 'unrelated-production')
-        os.environ['PROGRAMDATA'] = str(self.root / 'ProgramData')
-        self.assertEqual(launcher.configure_data_paths(), self.data)
-        for key, folder in [('DATA', 'data'), ('STORAGE', 'storage'), ('EXPORT', 'exports'), ('BACKUP', 'backups'), ('LOG', 'logs')]:
-            self.assertEqual(Path(os.environ[f'ELEVATOR_{key}_DIR']), self.data / folder)
+        os.environ['WEBVIEW2_USER_DATA_FOLDER'] = str(self.program / 'WebView2')
+        os.environ['LOCALAPPDATA'] = str(self.root / 'LocalAppData')
+        resolved = launcher.configure_data_paths(program_root=self.program)
+        self.assertEqual(resolved, self.data)
+        self.assertNotEqual(resolved, self.program)
+        self.assertNotIn(self.program.resolve(), resolved.resolve().parents)
+
+        for key, folder in [('DATA', 'data'), ('STORAGE', 'storage'), ('EXPORT', 'exports'),
+                            ('BACKUP', 'backups'), ('LOG', 'logs')]:
+            configured = Path(os.environ[f'ELEVATOR_{key}_DIR']).resolve()
+            self.assertEqual(configured, (self.data / folder).resolve())
+            self.assertNotIn(self.program.resolve(), configured.parents)
+
+        webview_folder = Path(os.environ['WEBVIEW2_USER_DATA_FOLDER']).resolve()
+        self.assertEqual(webview_folder, (self.data / 'WebView2').resolve())
+        self.assertNotIn('ChangfuliElevatorLedger', str(webview_folder))
+        self.assertNotIn(self.program.resolve(), webview_folder.parents)
         self.assertFalse((self.root / 'unrelated-production').exists())
         self.assertFalse((self.program / 'data').exists())
 
+        # Data root inside, equal to, or enclosing INSTDIR must be rejected.
+        with self.assertRaisesRegex(RuntimeError, '数据目录必须独立于程序安装目录'):
+            launcher.configure_data_paths(self.program, program_root=self.program)
+        with self.assertRaisesRegex(RuntimeError, '数据目录必须独立于程序安装目录'):
+            launcher.configure_data_paths(self.root, program_root=self.root / launcher.APP_ID / 'installed-app')
+
+    def test_elevated_check_never_creates_admin_database_and_data_folder_opens_user_root(self):
+        admin_local = self.root / 'ElevatedAdminLocalAppData'
+        user_local = self.root / 'InteractiveUserLocalAppData'
+        admin_local.mkdir()
+        user_local.mkdir()
+        with patch.dict(os.environ, LOCALAPPDATA=str(admin_local)), \
+                patch.object(launcher, 'check_installation') as check:
+            self.assertEqual(launcher.main(['--check', '--quiet']), 0)
+            check.assert_called_once()
+            self.assertIsNone(check.call_args.args[1])
+        self.assertFalse((admin_local / launcher.APP_ID).exists())
+
+        with patch.dict(os.environ, LOCALAPPDATA=str(user_local)), \
+                patch.object(launcher.os, 'startfile', create=True) as startfile:
+            self.assertEqual(launcher.main(['--data-folder']), 0)
+            startfile.assert_called_once_with(str(user_local / launcher.APP_ID))
+        self.assertFalse((user_local / launcher.APP_ID / 'data/elevator.db').exists())
+
     def test_existing_directory_links_and_wrong_types_are_refused_before_writes(self):
         outside = self.root / 'outside'; outside.mkdir()
-        for relative in ('', 'data', 'storage', 'exports', 'backups', 'logs'):
+        for relative in ('', 'data', 'storage', 'exports', 'backups', 'logs', 'WebView2'):
             for symlink in (False, True):
                 with self.subTest(relative=relative, symlink=symlink):
                     base = self.root / f'base-{relative or "root"}-{symlink}'
-                    target = base / launcher.APP_ID / relative
+                    target = base / launcher.APP_ID / relative if relative else base / launcher.APP_ID
                     target.parent.mkdir(parents=True, exist_ok=True)
                     if symlink:
                         target.symlink_to(outside, target_is_directory=True)
                     else:
                         target.write_text('preserve', encoding='utf-8')
-                    with self.assertRaisesRegex(RuntimeError, '公共数据路径'):
-                        launcher.configure_data_paths(base)
-        base = self.root / 'linked-ProgramData'
+                    with self.assertRaisesRegex(RuntimeError, '本地数据路径'):
+                        launcher.configure_data_paths(base, program_root=self.program)
+        base = self.root / 'linked-LocalAppData'
         base.symlink_to(outside, target_is_directory=True)
-        with self.assertRaisesRegex(RuntimeError, '公共数据路径'):
-            launcher.configure_data_paths(base)
+        with self.assertRaisesRegex(RuntimeError, '本地数据路径'):
+            launcher.configure_data_paths(base, program_root=self.program)
         self.assertEqual(list(outside.iterdir()), [])
 
     def test_linked_or_nonfile_log_lock_state_and_temporary_never_modify_target(self):
@@ -86,7 +145,7 @@ async def app(scope, receive, send):
         operations = [
             ('logs/launcher.log', lambda: launcher.configure_logging(self.data)),
             (launcher.LOCK_FILE, lambda: launcher.try_lock(self.data)),
-            (launcher.STATE_FILE, lambda: launcher.load_state(self.data, 8765)),
+            (launcher.STATE_FILE, lambda: launcher.load_state(self.data, 8766)),
             (launcher.STATE_FILE, lambda: launcher.run_server(self.program, self.data)),
             ('data/elevator.db', lambda: launcher.check_installation(self.program, self.data)),
             (launcher.STATE_FILE + f'.{os.getpid()}.tmp', lambda: launcher.run_server(self.program, self.data)),
@@ -100,7 +159,7 @@ async def app(scope, receive, send):
                     else:
                         target.mkdir()
                     try:
-                        with patch.object(launcher.socket, 'socket'), self.assertRaisesRegex(RuntimeError, '公共数据路径'):
+                        with patch.object(launcher.socket, 'socket'), self.assertRaisesRegex(RuntimeError, '本地数据路径'):
                             operation()
                         self.assertEqual(outside.read_text(encoding='utf-8'), 'preserve')
                     finally:
@@ -112,12 +171,12 @@ async def app(scope, receive, send):
     def test_windows_reparse_attribute_is_rejected_for_directories_and_files(self):
         original_lstat = Path.lstat
         cases = [
-            (self.data.parent, lambda: launcher.configure_data_paths(self.data.parent)),
-            (self.data, lambda: launcher.configure_data_paths(self.data.parent)),
+            (self.data.parent, lambda: launcher.configure_data_paths(self.data.parent, program_root=self.program)),
+            (self.data, lambda: launcher.configure_data_paths(self.data.parent, program_root=self.program)),
             (self.data / 'logs', lambda: launcher.configure_logging(self.data)),
             (self.data / 'logs/launcher.log', lambda: launcher.configure_logging(self.data)),
             (self.data / launcher.LOCK_FILE, lambda: launcher.try_lock(self.data)),
-            (self.data / launcher.STATE_FILE, lambda: launcher.load_state(self.data, 8765)),
+            (self.data / launcher.STATE_FILE, lambda: launcher.load_state(self.data, 8766)),
             (self.data / (launcher.STATE_FILE + f'.{os.getpid()}.tmp'), lambda: launcher.run_server(self.program, self.data)),
         ]
         for target, operation in cases:
@@ -135,6 +194,8 @@ async def app(scope, receive, send):
         with patch.object(launcher.importlib, 'import_module', wraps=launcher.importlib.import_module) as imports:
             launcher.check_installation(self.program, self.data)
         self.assertFalse(any(call.args[0].startswith('backend') for call in imports.call_args_list))
+        if os.name != 'nt':
+            self.assertNotIn('webview', [call.args[0] for call in imports.call_args_list])
         self.assertFalse((self.data / 'data/elevator.db').exists())
         (self.program / 'frontend/dist/assets/app.js').unlink()
         with self.assertRaisesRegex(RuntimeError, '页面资源缺失'):
@@ -143,6 +204,16 @@ async def app(scope, receive, send):
         (self.data / 'data/elevator.db').write_bytes(b'not a sqlite database')
         with self.assertRaises(Exception):
             launcher.check_installation(self.program, self.data)
+
+    def test_windows_check_verifies_desktop_dependencies_without_opening_window(self):
+        with patch.object(launcher, 'os') as os_api, patch.object(launcher.sys, 'version_info', (3, 12)), \
+                patch.object(launcher.importlib, 'import_module') as imports, \
+                patch.object(launcher, 'open_operator_window') as window:
+            os_api.name = 'nt'
+            launcher.check_installation(self.program, self.data)
+            imports.assert_any_call('webview')
+            imports.assert_any_call('clr')
+            window.assert_not_called()
 
     def test_control_is_loopback_only_and_requires_valid_post_token_without_origin(self):
         calls = []
@@ -169,39 +240,376 @@ async def app(scope, receive, send):
         challenge = 'cd' * 32
         status, identity = request(launcher.IDENTITY_PATH, 'GET', headers=[(b'x-launcher-challenge', challenge.encode())])
         self.assertEqual(status, 200)
+        self.assertEqual(identity['app'], 'ChangfuliElevatorDesktop')
+        self.assertEqual(identity['version'], '2.0.3')
         self.assertEqual(identity['proof'], launcher.signature(secret, challenge))
         self.assertNotIn(secret, json.dumps(identity))
 
-    def test_invalid_state_fake_identity_and_proxy_settings_never_open_an_occupier(self):
-        for invalid in [[], {'app': launcher.APP_ID, 'port': 123, 'secret': []}, {'app': 'other', 'port': 8765, 'secret': 'ab' * 32}]:
-            (self.data / launcher.STATE_FILE).write_text(json.dumps(invalid))
+    def test_invalid_state_fake_identity_and_leftover_1x_instance_are_ignored(self):
+        legacy_secret = 'ab' * 32
+        for invalid in [
+            [],
+            {'app': launcher.APP_ID, 'port': 123, 'secret': []},
+            {'app': 'other', 'port': 8766, 'secret': legacy_secret},
+            {'app': 'ChangfuliElevatorLedger', 'port': 8765, 'secret': legacy_secret},
+            {'app': 'ChangfuliElevatorLedger', 'port': 8766, 'secret': legacy_secret},
+        ]:
+            (self.data / launcher.STATE_FILE).write_text(json.dumps(invalid), encoding='utf-8')
+            self.assertIsNone(launcher.load_state(self.data, 8766))
             self.assertIsNone(launcher.load_state(self.data, 8765))
-        state = {'app': launcher.APP_ID, 'port': 8765, 'secret': 'ab' * 32}
+
+        state = {'app': launcher.APP_ID, 'port': 8766, 'secret': legacy_secret}
         with patch.object(launcher, 'local_request', return_value={'app': launcher.APP_ID, 'ready': True, 'proof': 'fake'}) as request:
             self.assertFalse(launcher.probe_instance(state))
             self.assertNotIn(state['secret'], str(request.call_args))
+
+        # Mock a live 1.x server responding with ChangfuliElevatorLedger and a valid HMAC proof.
+        v1_requests = []
+
+        class LegacyHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                v1_requests.append(('GET', self.path))
+                challenge = self.headers.get('X-Launcher-Challenge', '')
+                body = {'ok': True} if self.path == '/api/health' else {
+                    'app': 'ChangfuliElevatorLedger',
+                    'ready': True,
+                    'proof': launcher.signature(legacy_secret, challenge) if challenge else '',
+                }
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(body).encode('utf-8'))
+
+            def do_POST(self):
+                v1_requests.append(('POST', self.path))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"stopping":true}')
+
+            def log_message(self, *args):
+                pass
+
+        legacy_server = ThreadingHTTPServer(('127.0.0.1', 0), LegacyHandler)
+        legacy_thread = threading.Thread(target=legacy_server.serve_forever, daemon=True)
+        legacy_thread.start()
+        self.addCleanup(lambda: (legacy_server.shutdown(), legacy_server.server_close()))
+
+        # Even if a 1.x state file exists in ProgramData\ChangfuliElevatorLedger and holds runtime-instance.lock,
+        # 2.0 stop_instance and probe_instance never attach to or stop the 1.x server.
+        legacy_dir = self.root / 'ProgramData/ChangfuliElevatorLedger'
+        legacy_dir.mkdir(parents=True, exist_ok=True)
+        (legacy_dir / 'runtime-instance.json').write_text(json.dumps({
+            'app': 'ChangfuliElevatorLedger',
+            'pid': 99999,
+            'port': legacy_server.server_port,
+            'secret': legacy_secret,
+        }), encoding='utf-8')
+        legacy_lock = open(legacy_dir / 'runtime-instance.lock', 'a+b', buffering=0)
+        self.addCleanup(legacy_lock.close)
+        import fcntl
+        fcntl.flock(legacy_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        self.assertFalse(launcher.probe_instance({
+            'app': 'ChangfuliElevatorLedger',
+            'port': legacy_server.server_port,
+            'secret': legacy_secret,
+        }))
+        # Spoofed server returning ChangfuliElevatorLedger when state claims ChangfuliElevatorDesktop is rejected too.
+        self.assertFalse(launcher.probe_instance({
+            'app': launcher.APP_ID,
+            'port': legacy_server.server_port,
+            'secret': legacy_secret,
+        }))
+        launcher.stop_instance(self.data, port=legacy_server.server_port, timeout=0.3)
+        self.assertFalse(any(method == 'POST' for method, _ in v1_requests))
         self.assertIsNone(launcher.NoRedirect().redirect_request(None, None, 302, '', {}, 'https://example.invalid'))
 
-    def test_busy_port_does_not_kill_service_or_open_browser_and_releases_ownership(self):
+    def test_legacy_attachment_retry_repairs_partial_or_different_content(self):
+        source_dir = self.root / 'legacy-photos'
+        source_dir.mkdir()
+        target_dir = self.data / 'storage'
+        source = source_dir / 'photo.png'
+        destination = target_dir / source.name
+        content = b'complete photo'
+        source.write_bytes(content)
+
+        def interrupt_copy(src, tmp):
+            tmp = Path(tmp)
+            self.assertEqual(tmp.parent, destination.parent)
+            self.assertNotEqual(tmp, destination)
+            tmp.write_bytes(b'interrupted')
+            raise OSError('copy interrupted')
+
+        for leftover in (b'partial', b'x' * len(content)):
+            with self.subTest(leftover=leftover):
+                destination.write_bytes(leftover)
+                # Equal timestamps and lengths alone cannot establish a match.
+                os.utime(destination, ns=(source.stat().st_atime_ns, source.stat().st_mtime_ns))
+                with patch.object(shutil, 'copy2', side_effect=interrupt_copy), self.assertRaises(OSError):
+                    launcher._copy_legacy_tree(source_dir, target_dir, self.data)
+                self.assertEqual(list(target_dir.iterdir()), [destination])
+                self.assertEqual(destination.read_bytes(), leftover)
+
+                self.assertEqual(launcher._copy_legacy_tree(source_dir, target_dir, self.data), 1)
+                self.assertEqual(destination.read_bytes(), content)
+                self.assertEqual(source.read_bytes(), content)
+
+    def test_legacy_attachment_with_identical_content_is_preserved(self):
+        source_dir = self.root / 'legacy-photos'
+        source_dir.mkdir()
+        target_dir = self.data / 'storage'
+        source = source_dir / 'photo.png'
+        destination = target_dir / source.name
+        source.write_bytes(b'complete photo')
+        destination.write_bytes(source.read_bytes())
+        os.utime(destination, (1234567890, 1234567890))
+        original_mtime = destination.stat().st_mtime_ns
+
+        self.assertEqual(launcher._copy_legacy_tree(source_dir, target_dir, self.data), 0)
+        self.assertEqual(destination.stat().st_mtime_ns, original_mtime)
+        self.assertEqual(destination.read_bytes(), source.read_bytes())
+
+    def test_legacy_attachment_read_failure_leaves_database_uninstalled_until_retry(self):
+        program_data = self.root / 'ProgramData'
+        os.environ['LOCALAPPDATA'] = str(self.root / 'LocalAppData')
+        os.environ['APPDATA'] = str(self.root / 'Roaming')
+        legacy = program_data / launcher.LEGACY_APP_ID
+        photos = legacy / 'storage/photos'
+        photos.mkdir(parents=True)
+        photo = photos / 'photo.png'
+        photo.write_bytes(b'legacy photo')
+        source_db = legacy / 'data/elevator.db'
+        source_db.parent.mkdir()
+        with closing(sqlite3.connect(source_db)) as conn:
+            conn.execute('CREATE TABLE elevators (id INTEGER PRIMARY KEY)')
+            conn.execute('INSERT INTO elevators VALUES (27)')
+            conn.commit()
+
+        original_db = source_db.read_bytes()
+        destination_db = self.data / 'data/elevator.db'
+        for method, blocked in [('iterdir', photos), ('lstat', photo), ('lstat', legacy / 'storage')]:
+            with self.subTest(method=method, blocked=blocked):
+                original = getattr(Path, method)
+
+                def deny_read(path):
+                    if path == blocked:
+                        raise PermissionError(str(path))
+                    return original(path)
+
+                with patch.object(Path, method, deny_read), self.assertLogs(level='WARNING'):
+                    self.assertFalse(launcher.migrate_legacy_data(self.data, program_data))
+                self.assertFalse(destination_db.exists())
+                self.assertFalse((self.data / launcher.MIGRATION_FILE).exists())
+
+        self.assertTrue(launcher.migrate_legacy_data(self.data, program_data))
+        with closing(sqlite3.connect(destination_db)) as conn:
+            self.assertEqual(conn.execute('SELECT id FROM elevators').fetchall(), [(27,)])
+        self.assertEqual((self.data / 'storage/photos/photo.png').read_bytes(), b'legacy photo')
+        self.assertEqual(source_db.read_bytes(), original_db)
+        self.assertEqual(photo.read_bytes(), b'legacy photo')
+
+    def test_legacy_v1_data_migration_copies_when_empty_preserves_old_and_never_overwrites(self):
+        legacy_program_data = self.root / 'ProgramData'
+        legacy_root = legacy_program_data / 'ChangfuliElevatorLedger'
+        for folder in ('data', 'storage/photos', 'exports', 'backups', 'logs'):
+            (legacy_root / folder).mkdir(parents=True, exist_ok=True)
+
+        legacy_db = legacy_root / 'data/elevator.db'
+        with closing(sqlite3.connect(legacy_db)) as conn:
+            conn.execute('PRAGMA journal_mode=WAL')
+            conn.execute('CREATE TABLE buildings (id INTEGER PRIMARY KEY, name TEXT NOT NULL)')
+            conn.execute("INSERT INTO buildings(name) VALUES ('迁移测试18栋')")
+            conn.commit()
+        (legacy_root / 'storage/photos/site-1.png').write_bytes(b'fake-png-content')
+        (legacy_root / 'exports/archive-1.docx').write_bytes(b'fake-docx-content')
+        (legacy_root / 'backups/backup-1.zip').write_bytes(b'fake-zip-content')
+        (legacy_root / 'logs/system.log').write_text('legacy log entry\n', encoding='utf-8')
+
+        # 1) New 2.0 data root has no elevator.db -> safe copy succeeds and writes migration record.
+        self.assertFalse((self.data / 'data/elevator.db').exists())
+        migrated = launcher.migrate_legacy_data(self.data, program_data=legacy_program_data)
+        self.assertTrue(migrated)
+        self.assertTrue((self.data / 'data/elevator.db').is_file())
+        with closing(sqlite3.connect(self.data / 'data/elevator.db')) as conn:
+            rows = conn.execute('SELECT name FROM buildings').fetchall()
+        self.assertEqual(rows, [('迁移测试18栋',)])
+        self.assertEqual((self.data / 'storage/photos/site-1.png').read_bytes(), b'fake-png-content')
+        self.assertEqual((self.data / 'exports/archive-1.docx').read_bytes(), b'fake-docx-content')
+        self.assertEqual((self.data / 'backups/backup-1.zip').read_bytes(), b'fake-zip-content')
+
+        record = json.loads((self.data / launcher.MIGRATION_FILE).read_text(encoding='utf-8'))
+        self.assertEqual(record['source_app_id'], 'ChangfuliElevatorLedger')
+        self.assertEqual(record['target_app_id'], 'ChangfuliElevatorDesktop')
+        self.assertEqual(set(record['copied_folders']), {'data', 'storage', 'exports', 'backups'})
+
+        # Old 1.x directory and files must still be completely present and intact.
+        self.assertTrue(legacy_db.is_file())
+        self.assertEqual((legacy_root / 'storage/photos/site-1.png').read_bytes(), b'fake-png-content')
+        self.assertEqual((legacy_root / 'exports/archive-1.docx').read_bytes(), b'fake-docx-content')
+        self.assertEqual((legacy_root / 'backups/backup-1.zip').read_bytes(), b'fake-zip-content')
+        self.assertEqual((legacy_root / 'logs/system.log').read_text(encoding='utf-8'), 'legacy log entry\n')
+
+        # 2) When 2.0 already has its own database, migration must NOT overwrite it and must NOT fail.
+        with closing(sqlite3.connect(self.data / 'data/elevator.db')) as conn:
+            conn.execute("DELETE FROM buildings")
+            conn.execute("INSERT INTO buildings(name) VALUES ('2.0独立新建27栋')")
+            conn.commit()
+        with closing(sqlite3.connect(legacy_db)) as conn:
+            conn.execute("INSERT INTO buildings(name) VALUES ('旧版后续记录99栋')")
+            conn.commit()
+        (legacy_root / 'storage/photos/only-in-old.png').write_bytes(b'do-not-copy-when-db-exists')
+
+        migrated_again = launcher.migrate_legacy_data(self.data, program_data=legacy_program_data)
+        self.assertFalse(migrated_again)
+        with closing(sqlite3.connect(self.data / 'data/elevator.db')) as conn:
+            rows = conn.execute('SELECT name FROM buildings').fetchall()
+        self.assertEqual(rows, [('2.0独立新建27栋',)])
+        self.assertFalse((self.data / 'storage/photos/only-in-old.png').exists())
+        self.assertTrue((legacy_root / 'storage/photos/only-in-old.png').is_file())
+
+    def test_first_launch_seed_imports_synthetic_fixture_with_no_login_operator(self):
+        with isolated_app() as (client, paths):
+            seeded = paths['DATA'].parent / 'seed/official-ledger.xlsx'
+            seeded.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(FIXTURE_LEDGER, seeded)
+            from backend import main
+            main.seed_empty_ledger(main.actor())
+            self.assertEqual(client.get('/api/setup/status').json(), {'needed': False})
+            elevators = client.get('/api/elevators').json()
+            self.assertEqual(len(elevators), 9)
+            report = json.loads((paths['LOGS'] / 'seed-import-report.json').read_text(encoding='utf-8'))
+            self.assertTrue(report['committed'])
+
+    def test_legacy_search_paths_and_empty_migrated_db_still_seeds_from_program_root(self):
+        def make_legacy_db(base_dir, elevator_names=()):
+            legacy_root = base_dir / 'ChangfuliElevatorLedger'
+            (legacy_root / 'data').mkdir(parents=True, exist_ok=True)
+            (legacy_root / 'storage/photos').mkdir(parents=True, exist_ok=True)
+            db_file = legacy_root / 'data/elevator.db'
+            with closing(sqlite3.connect(db_file)) as conn:
+                conn.executescript("""
+                    CREATE TABLE buildings (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, deleted_at TEXT);
+                    CREATE TABLE units (id INTEGER PRIMARY KEY, building_id INTEGER NOT NULL, name TEXT NOT NULL, deleted_at TEXT);
+                    CREATE TABLE elevators (
+                      id INTEGER PRIMARY KEY, unit_id INTEGER NOT NULL REFERENCES units(id), name TEXT NOT NULL,
+                      internal_number TEXT, equipment_number TEXT, brand TEXT, model TEXT, manufactured_on TEXT,
+                      started_on TEXT, maintenance_company TEXT, maintenance_contact TEXT, maintenance_phone TEXT,
+                      inspection_on TEXT, maintenance_due_on TEXT, status TEXT NOT NULL DEFAULT '正常', notes TEXT,
+                      deleted_at TEXT, UNIQUE(unit_id,name));
+                """)
+                if elevator_names:
+                    conn.execute("INSERT INTO buildings(id, name) VALUES (1, '18栋')")
+                    conn.execute("INSERT INTO units(id, building_id, name) VALUES (1, 1, '1单元')")
+                    for idx, name in enumerate(elevator_names, 1):
+                        conn.execute("INSERT INTO elevators(id, unit_id, name) VALUES (?, 1, ?)", (idx, name))
+                conn.commit()
+            return legacy_root
+
+        # 1) ProgramData has an empty 1.x DB (0 elevators), LocalAppData has none, Roaming AppData has 2 elevators.
+        prog_empty = self.root / 'case1-ProgramData'
+        local_none = self.root / 'case1-LocalAppData'
+        roaming_has = self.root / 'case1-RoamingAppData'
+        prog_none_dir = prog_empty.mkdir() or make_legacy_db(prog_empty, ())
+        local_none.mkdir()
+        roaming_legacy = roaming_has.mkdir() or make_legacy_db(roaming_has, ('1号电梯', '2号电梯'))
+        (roaming_legacy / 'storage/photos/roaming.png').write_bytes(b'roaming-photo')
+
+        data_case1 = launcher.configure_data_paths(local_none, program_root=self.program)
+        self.assertTrue(launcher.migrate_legacy_data(
+            data_case1, program_data=prog_empty, local_app_data=local_none, roaming_app_data=roaming_has
+        ))
+        record1 = json.loads((data_case1 / launcher.MIGRATION_FILE).read_text(encoding='utf-8'))
+        self.assertEqual(Path(record1['source_root']), roaming_legacy)
+        self.assertEqual(record1['migrated_elevators'], 2)
+        self.assertEqual((data_case1 / 'storage/photos/roaming.png').read_bytes(), b'roaming-photo')
+        self.assertTrue((prog_none_dir / 'data/elevator.db').is_file())
+        self.assertTrue((roaming_legacy / 'data/elevator.db').is_file())
+
+        # Already has elevators in 2.0 -> never overwritten by another legacy tree.
+        local_other = make_legacy_db(local_none, ('9号电梯',))
+        self.assertFalse(launcher.migrate_legacy_data(
+            data_case1, program_data=prog_empty, local_app_data=local_none, roaming_app_data=roaming_has
+        ))
+        with closing(sqlite3.connect(data_case1 / 'data/elevator.db')) as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM elevators').fetchone()[0], 2)
+        self.assertTrue((local_other / 'data/elevator.db').is_file())
+
+        # 2) Existing 2.0.0 data root with an empty elevator.db (0 elevators) can still migrate LocalAppData 1.x ledger.
+        local_case2 = self.root / 'case2-LocalAppData'
+        local_case2.mkdir()
+        local_legacy2 = make_legacy_db(local_case2, ('1号电梯',))
+        data_case2 = launcher.configure_data_paths(local_case2, program_root=self.program)
+        with closing(sqlite3.connect(data_case2 / 'data/elevator.db')) as conn:
+            conn.execute('CREATE TABLE elevators (id INTEGER PRIMARY KEY, name TEXT, deleted_at TEXT)')
+            conn.commit()
+        self.assertTrue(launcher.migrate_legacy_data(
+            data_case2, program_data=self.root / 'nonexistent-pd', local_app_data=local_case2,
+            roaming_app_data=self.root / 'nonexistent-roam'
+        ))
+        with closing(sqlite3.connect(data_case2 / 'data/elevator.db')) as conn:
+            self.assertEqual(conn.execute('SELECT name FROM elevators').fetchall(), [('1号电梯',)])
+        self.assertTrue((local_legacy2 / 'data/elevator.db').is_file())
+
+        # 3) Empty program_root without seed file leaves ELEVATOR_SEED_LEDGER unset; existing seed file sets it.
+        os.environ['ELEVATOR_SEED_LEDGER'] = str(self.root / 'missing-seed.xlsx')
+        self.assertIsNone(launcher.configure_seed_ledger(self.program))
+        self.assertIsNone(os.environ.get('ELEVATOR_SEED_LEDGER'))
+
+        installed_seed = self.program / 'seed/official-ledger.xlsx'
+        installed_seed.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(FIXTURE_LEDGER, installed_seed)
+        configured_seed = launcher.configure_seed_ledger(self.program)
+        self.assertEqual(configured_seed, installed_seed.resolve())
+        self.assertEqual(os.environ.get('ELEVATOR_SEED_LEDGER'), str(installed_seed.resolve()))
+
+        with isolated_app(seed=os.environ['ELEVATOR_SEED_LEDGER']) as (client, paths):
+            # Replace isolated DB with an empty migrated 1.x DB before restarting backend lifespan.
+            empty_v1_base = self.root / 'case3-ProgramData'
+            empty_v1_base.mkdir()
+            empty_v1_root = make_legacy_db(empty_v1_base, ())
+            (empty_v1_root / 'storage/photos/legacy-keep.png').write_bytes(b'keep')
+            v2_root = paths['DATA'].parent
+            paths['DB'].unlink(missing_ok=True)
+            self.assertTrue(launcher.migrate_legacy_data(
+                v2_root, program_data=empty_v1_base,
+                local_app_data=self.root / 'none-local', roaming_app_data=self.root / 'none-roam'
+            ))
+            self.assertEqual((paths['STORAGE'] / 'photos/legacy-keep.png').read_bytes(), b'keep')
+            from fastapi.testclient import TestClient
+            from backend.main import app
+            with TestClient(app) as seeded_client:
+                self.assertEqual(len(seeded_client.get('/api/elevators').json()), 9)
+                self.assertEqual(len(seeded_client.get('/api/events').json()), 5)
+                status = seeded_client.get('/api/seed-status').json()
+                self.assertTrue(status['committed'])
+                self.assertEqual((status['seed_elevators'], status['seed_events']), (9, 5))
+
+    def test_busy_port_does_not_kill_service_or_open_window_and_releases_ownership(self):
         with socket.socket() as occupied:
             occupied.bind(('0.0.0.0', 0)); occupied.listen()
             port = occupied.getsockname()[1]
-            with patch.object(launcher.webbrowser, 'open') as browser:
+            with patch.object(launcher, 'open_operator_window') as window:
                 with self.assertRaisesRegex(RuntimeError, '已被其他程序占用'):
                     launcher.run_server(self.program, self.data, port=port)
-                browser.assert_not_called()
+                window.assert_not_called()
             self.assertGreaterEqual(occupied.fileno(), 0)
         handle = launcher.try_lock(self.data)
         self.assertIsNotNone(handle); handle.close()
         self.assertFalse((self.data / launcher.STATE_FILE).exists())
 
     def test_maintenance_blocks_start_before_backend_import_or_database_access(self):
-        (self.data / 'maintenance.flag').write_text('installer maintenance', encoding='utf-8')
-        with patch.object(launcher, 'check_installation') as check, patch.object(launcher.webbrowser, 'open') as browser:
-            with self.assertRaisesRegex(RuntimeError, '正在安装或维护'):
-                launcher.run_server(self.program, self.data)
-            check.assert_not_called()
-            browser.assert_not_called()
+        for flag_location in (self.data / 'maintenance.flag', self.program / 'maintenance.flag'):
+            with self.subTest(flag=flag_location.parent.name):
+                flag_location.write_text('installer maintenance', encoding='utf-8')
+                try:
+                    with patch.object(launcher, 'check_installation') as check, \
+                            patch.object(launcher, 'open_operator_window') as window:
+                        with self.assertRaisesRegex(RuntimeError, '正在安装或维护'):
+                            launcher.run_server(self.program, self.data)
+                        check.assert_not_called()
+                        window.assert_not_called()
+                finally:
+                    flag_location.unlink()
         self.assertFalse((self.data / 'data/elevator.db').exists())
         self.assertFalse((self.data / launcher.STATE_FILE).exists())
         handle = launcher.try_lock(self.data)
@@ -239,28 +647,166 @@ async def app(scope, receive, send):
             os_api.name = 'nt'
             self.assertEqual(launcher.main(['--stop']), 0)
             stop.assert_called_once_with(self.data)
-            windll.user32.MessageBoxW.assert_called_once_with(None, '电梯管理系统已停止。需要使用时请重新打开桌面图标。',
-                                                            '昌福里社区27区电梯管理台账', 0x40)
+            windll.user32.MessageBoxW.assert_called_once_with(
+                None, '电梯管理系统已停止。需要使用时请重新打开桌面图标。', launcher.WINDOW_TITLE, 0x40
+            )
             windll.user32.MessageBoxW.reset_mock()
             self.assertEqual(launcher.main(['--stop', '--quiet']), 0)
             windll.user32.MessageBoxW.assert_not_called()
 
+    def test_repeat_launch_restores_only_own_2_0_window_never_1x_or_browser(self):
+        with patch.object(launcher.ctypes, 'windll', create=True) as windll, patch('webbrowser.open') as browser:
+            api = windll.user32
+
+            # The first clean-titled window belongs to 1.x, the second to the verified process.
+            api.FindWindowW.side_effect = lambda cls, title: 123 if title == launcher.WINDOW_TITLE else 0
+            api.FindWindowExW.side_effect = lambda parent, previous, cls, title: 456 if previous.value == 123 else 0
+
+            def get_owner(hwnd, owner):
+                owner._obj.value = {123: 12, 456: 45}[hwnd.value]
+                return 1
+
+            api.GetWindowThreadProcessId.side_effect = get_owner
+            launcher.activate_existing_window(45)
+            api.FindWindowW.assert_called_once_with(None, '昌福里社区电梯管理系统')
+            self.assertEqual(api.ShowWindow.call_args.args[0].value, 456)
+            self.assertEqual(api.SetForegroundWindow.call_args.args[0].value, 456)
+            api.MessageBoxW.assert_not_called()
+            api.SetForegroundWindow.reset_mock()
+            api.ShowWindow.reset_mock()
+
+            launcher.activate_existing_window(67)
+            api.ShowWindow.assert_not_called()
+            api.SetForegroundWindow.assert_not_called()
+            self.assertIn('电梯管理系统已在运行', api.MessageBoxW.call_args.args[1])
+            api.MessageBoxW.reset_mock()
+            api.SetForegroundWindow.return_value = 0
+            launcher.activate_existing_window(45)
+            api.MessageBoxW.assert_called_once()
+            browser.assert_not_called()
+
+    def test_repeat_launch_finds_verified_window_with_previous_title(self):
+        for suffix in (' 2.0.2', ' 2.0'):
+            with self.subTest(suffix=suffix), patch.object(launcher.ctypes, 'windll', create=True) as windll:
+                api = windll.user32
+                api.FindWindowW.side_effect = lambda cls, title: 456 if title == launcher.WINDOW_TITLE + suffix else 0
+
+                def get_owner(hwnd, owner):
+                    owner._obj.value = 45
+                    return 1
+
+                api.GetWindowThreadProcessId.side_effect = get_owner
+                launcher.activate_existing_window(45)
+                self.assertEqual(api.SetForegroundWindow.call_args.args[0].value, 456)
+                api.MessageBoxW.assert_not_called()
+
+    def test_desktop_window_settings_stop_and_webview2_failures(self):
+        class Event:
+            def __iadd__(self, callback):
+                return callback  # Retain the registered handler for the fake GUI loop.
+
+        for outcome in ('stop', 'legacy renderer', 'initialization failure', 'start exception'):
+            with self.subTest(outcome=outcome):
+                stopped = threading.Event()
+                events = SimpleNamespace(initialized=Event(), before_show=Event(), shown=Event(),
+                                         closed=threading.Event())
+                control = SimpleNamespace(CoreWebView2InitializationCompleted=Event())
+                window = Mock(events=events, native=SimpleNamespace(webview=control))
+                gui = Mock(settings={}, renderer='mshtml' if outcome == 'legacy renderer' else 'edgechromium')
+                gui.create_window.return_value = window
+
+                def start(**kwargs):
+                    if outcome == 'start exception':
+                        raise OSError('renderer startup failed')
+                    if not events.initialized(gui.renderer):
+                        return
+                    events.before_show()
+                    if outcome == 'initialization failure':
+                        control.CoreWebView2InitializationCompleted(None, SimpleNamespace(
+                            IsSuccess=False, InitializationException='synthetic failure'))
+                    else:
+                        view = Mock()
+                        control.CoreWebView2InitializationCompleted(view, SimpleNamespace(IsSuccess=True))
+                        self.assertIs(view.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled, True)
+                        stopped.set()
+                    self.assertTrue(stopped.is_set())
+                    events.shown()
+
+                gui.start.side_effect = start
+                icon = self.program / (launcher.ICON_NAME if outcome == 'stop' else f'scripts/{launcher.ICON_NAME}')
+                icon.parent.mkdir(exist_ok=True)
+                icon.touch()
+                local_base = self.root / 'LocalAppData'
+                with patch.dict(sys.modules, webview=gui), patch.dict(os.environ, LOCALAPPDATA=str(local_base)), \
+                        patch('webbrowser.open') as browser:
+                    if outcome == 'stop':
+                        launcher.open_operator_window(self.program, 'http://127.0.0.1:8766', stopped)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, '请安装或修复 Microsoft Edge WebView2 Runtime'):
+                            launcher.open_operator_window(self.program, 'http://127.0.0.1:8766', stopped)
+                    browser.assert_not_called()
+                    expected_wv2 = str(local_base / 'ChangfuliElevatorDesktop' / 'WebView2')
+                    self.assertEqual(os.environ['WEBVIEW2_USER_DATA_FOLDER'], expected_wv2)
+                    self.assertEqual(gui.start.call_args.kwargs['storage_path'], expected_wv2)
+                gui.create_window.assert_called_once_with(
+                    '昌福里社区电梯管理系统', 'http://127.0.0.1:8766',
+                    width=1440, height=900, maximized=True, text_select=True,
+                )
+                self.assertEqual(gui.start.call_args.kwargs['gui'], 'edgechromium')
+                self.assertEqual(gui.start.call_args.kwargs['icon'], str(icon))
+                self.assertTrue(gui.settings['ALLOW_DOWNLOADS'])
+                if outcome in ('stop', 'initialization failure'):
+                    window.destroy.assert_called_once()
+                else:
+                    window.destroy.assert_not_called()
+                icon.unlink()
+
+    def test_webview2_error_is_shown_in_windows_dialog(self):
+        with patch.object(launcher, 'configure_data_paths', return_value=self.data), \
+                patch.object(launcher, 'configure_logging'), patch.object(launcher.logging, 'exception'), \
+                patch.object(launcher, 'run_server', side_effect=RuntimeError(launcher.WEBVIEW2_ERROR)), \
+                patch.object(launcher, 'os', name='windows_os') as os_api, \
+                patch.object(launcher.ctypes, 'windll', create=True) as windll:
+            os_api.name = 'nt'
+            self.assertEqual(launcher.main([]), 1)
+            msg = windll.user32.MessageBoxW.call_args.args[1]
+            self.assertIn(launcher.WEBVIEW2_ERROR, msg)
+            self.assertIn(str(self.data), msg)
+            self.assertNotIn('ChangfuliElevatorLedger', msg)
+            self.assertNotIn(' browser', msg)
+
     def test_real_server_ready_repeat_launch_and_graceful_stop_preserve_data(self):
         port = self.free_port()
-        opened = self.root / 'browser-opened.txt'
+        opened = self.root / 'window-opened.txt'
         repository = Path(__file__).resolve().parents[1]
-        code = '''import sys
+        code = '''import os, sys, threading, webbrowser
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
+os.environ['PROGRAMDATA']=sys.argv[6]
 from scripts import windows_launcher as launcher
-root=Path(sys.argv[2]); data=launcher.configure_data_paths(Path(sys.argv[3]))
+root=Path(sys.argv[2]); data=launcher.configure_data_paths(Path(sys.argv[3]), program_root=root)
 launcher.configure_logging(data)
-def browser(url):
+def unexpected_browser(*args, **kwargs):
+ raise AssertionError('Launcher opened the system browser')
+webbrowser.open=unexpected_browser
+def window(root, url, stopped):
+ assert threading.current_thread() is threading.main_thread()
+ assert os.environ.get('WEBVIEW2_USER_DATA_FOLDER') == str(data / 'WebView2')
+ assert launcher.probe_instance(launcher.load_state(data, int(sys.argv[4])))
  with open(sys.argv[5],'a',encoding='utf-8') as stream: stream.write(url+'\\n')
-launcher.webbrowser.open=browser
+ while not stopped.wait(0.05):
+  if (root/'close-window').exists(): return
+def activate(pid, quiet):
+ print('activate', pid)
+launcher.open_operator_window=window
+launcher.activate_existing_window=activate
 launcher.run_server(root,data,port=int(sys.argv[4]))
 '''
-        command = [sys.executable, '-c', code, str(repository), str(self.program), str(self.data.parent), str(port), str(opened)]
+        command = [
+            sys.executable, '-c', code,
+            str(repository), str(self.program), str(self.data.parent),
+            str(port), str(opened), str(self.root / 'ProgramData'),
+        ]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: process.kill() if process.poll() is None else None)
         deadline = time.monotonic() + 15
@@ -274,12 +820,14 @@ launcher.run_server(root,data,port=int(sys.argv[4]))
         else:
             self.fail('server did not become ready')
         self.assertEqual(opened.read_text().splitlines(), [f'http://127.0.0.1:{port}'])
+        self.assertEqual(state['app'], 'ChangfuliElevatorDesktop')
         secret = state['secret']
         with patch.dict(os.environ, {'http_proxy': 'http://127.0.0.1:1', 'HTTP_PROXY': 'http://127.0.0.1:1', 'NO_PROXY': ''}):
             self.assertTrue(launcher.probe_instance(state))
         repeated = subprocess.run(command, capture_output=True, text=True, timeout=10)
         self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
-        self.assertEqual(len(opened.read_text().splitlines()), 2)
+        self.assertEqual(repeated.stdout.strip(), f'activate {process.pid}')
+        self.assertEqual(opened.read_text().splitlines(), [f'http://127.0.0.1:{port}'])
         self.assertEqual(launcher.load_state(self.data, port)['secret'], secret)
         self.assertIsNone(process.poll())
         preserved = self.data / 'data' / 'business.bin'; preserved.write_bytes(b'unchanged')
@@ -294,7 +842,7 @@ launcher.run_server(root,data,port=int(sys.argv[4]))
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             state = launcher.load_state(self.data, port)
-            if state and launcher.probe_instance(state) and len(opened.read_text().splitlines()) == 3:
+            if state and launcher.probe_instance(state) and len(opened.read_text().splitlines()) == 2:
                 break
             if restarted.poll() is not None:
                 self.fail('immediate restart failed: ' + str(restarted.communicate()))
@@ -302,11 +850,15 @@ launcher.run_server(root,data,port=int(sys.argv[4]))
         else:
             self.fail('restarted server did not become ready')
         self.assertNotEqual(state['secret'], secret)
-        launcher.stop_instance(self.data, port=port, timeout=8)
+        (self.program / 'close-window').touch()
         stdout, stderr = restarted.communicate(timeout=8)
         self.assertEqual(restarted.returncode, 0, stdout + stderr)
         self.assertFalse((self.data / launcher.STATE_FILE).exists())
         self.assertEqual(preserved.read_bytes(), b'unchanged')
+        self.assertFalse(launcher.probe_instance(state))
+        handle = launcher.try_lock(self.data)
+        self.assertIsNotNone(handle)
+        handle.close()
 
 
 if __name__ == '__main__':

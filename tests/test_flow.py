@@ -27,13 +27,12 @@ class FlowTest(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
             return response.json()
 
-        self.assertTrue(c.get('/api/setup/status').json()['needed'])
+        self.assertFalse(c.get('/api/setup/status').json()['needed'])
         from fastapi.testclient import TestClient
         from backend.main import app
         remote = TestClient(app, client=('192.168.1.10', 50000))
-        self.assertEqual(remote.post('/api/setup', json={'username':'intruder','display_name':'外部','password':'a-long-pass-123'}).status_code, 403)
-        post('/api/setup', {'username':'admin','display_name':'测试管理员','password':'a-long-pass-123'})
-        post('/api/login', {'username':'admin','password':'a-long-pass-123'})
+        self.assertEqual(remote.get('/api/dashboard').status_code, 200)
+        self.assertFalse(remote.cookies)
         building = post('/api/buildings', {'name':'18栋'})['id']
         unit = post('/api/units', {'building_id':building,'name':'1单元'})['id']
         elevator = post('/api/elevators', {'unit_id':unit,'name':'1号梯','equipment_number':'T-001',
@@ -125,15 +124,9 @@ class FlowTest(unittest.TestCase):
             'occurred_on':current,'cost_yuan':'0','parts':[{'name':'免费配件','quantity':1,
                 'unit_price_yuan':'100','replaced_on':current}]})['id']
         self.assertEqual(c.get(f'/api/events/{free_part}').json()['cost_cents'],0)
-        staff = post('/api/users', {'username':'staff','display_name':'工作人员','password':'staff-pass-12345','role':'staff'})['id']
-        self.assertEqual(c.put(f'/api/users/{staff}',json={'display_name':'新工作人员','active':True}).status_code,200)
-        self.assertEqual(c.put('/api/users/1',json={'role':'staff'}).status_code,400)
-        from fastapi.testclient import TestClient
-        from backend.main import app
-        other = TestClient(app)
-        self.assertEqual(other.post('/api/login',json={'username':'staff','password':'staff-pass-12345'}).status_code,200)
-        self.assertEqual(other.post('/api/buildings',json={'name':'无权限楼栋'}).status_code,403)
-        self.assertEqual(other.put(f'/api/events/{first}',json={'type':'维修','title':'越权','occurred_on':current}).status_code,403)
+        self.assertEqual(remote.post('/api/buildings',json={'name':'共享楼栋'}).status_code,200)
+        existing = remote.get(f'/api/events/{first}').json()
+        self.assertEqual(remote.put(f'/api/events/{first}',json={**existing,'title':'补充记录'}).status_code,200)
         self.assertEqual(c.put(f'/api/buildings/{building}',json={'name':'18号楼'}).status_code,200)
         self.assertEqual(c.put(f'/api/units/{unit}',json={'name':'第一单元'}).status_code,200)
 

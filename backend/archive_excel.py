@@ -7,6 +7,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.worksheet.datavalidation import DataValidation
 from .db import COMMUNITY
+from .official_ledger import read_official_workbook
 
 COLUMNS = [('building_name','楼栋'),('unit_name','单元'),('name','电梯名称'),
            ('internal_number','内部编号'),('equipment_number','设备编号'),('brand','品牌'),('model','型号'),
@@ -45,10 +46,11 @@ def workbook_bytes(records):
     validation.add('O2:O501')
     instructions = workbook.create_sheet('填写说明')
     for line in [COMMUNITY + ' · 电梯基础档案', '在“电梯档案”页每行填写一部电梯，楼栋、单元、电梯名称为必填。',
-                 '例如：18栋 / 1单元 / 1号梯。名称相同才会归入同一楼栋和单元，请保持一致。',
+                 '例如：18栋 / 1口 / 1号电梯。旧格式“1单元”“1号梯”也可导入，同号档案会匹配已有资料。',
                  '日期格式：2026-09-27；设备编号和电话按文本填写以保留开头的0。',
                  '每次最多500部，文件不超过5MB，仅支持.xlsx，不支持公式或宏。',
                  '导入只新增档案；相同楼栋、单元、电梯名称的已有档案会跳过，不覆盖。',
+                 '不同名称匹配到同一楼栋或单元时，请按冲突提示核对位置名称后重新导入。',
                  '请勿改动首行列名。工作记录、照片和附件不包含在本表中。']:
         instructions.append([line])
     instructions.column_dimensions['A'].width = 100
@@ -67,7 +69,7 @@ def read_records(raw):
         raise ValueError('无法读取表格，请使用下载的.xlsx模板') from exc
     try:
         if '电梯档案' not in workbook.sheetnames:
-            raise ValueError('缺少“电梯档案”工作表，请使用下载的模板')
+            return read_official_workbook(workbook)
         sheet = workbook['电梯档案']
         sheet.reset_dimensions()
         iterator = sheet.iter_rows(max_col=len(COLUMNS)+1)

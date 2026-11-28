@@ -4,15 +4,15 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const base=process.env.ARCHIVE_EDITOR_TEST_URL;
 assert.ok(base,'Set ARCHIVE_EDITOR_TEST_URL to an isolated test server');
 const target=new URL(base);
-assert.ok(['127.0.0.1','localhost'].includes(target.hostname)&&target.port&&target.port!=='8765','Use an isolated loopback test port');
+assert.ok(['127.0.0.1','localhost'].includes(target.hostname)&&target.port&&!['8765','8766'].includes(target.port),'Use an isolated loopback test port');
 const out=process.env.AUDIT_OUTPUT||path.resolve('outputs/archive-editor-20261028/browser');
-const credentials={username:process.env.ARCHIVE_EDITOR_USERNAME||'archive-ui',display_name:'编排验收管理员',password:process.env.ARCHIVE_EDITOR_PASSWORD||'archive-ui-test-2026'};
+
 (async()=>{
  fs.mkdirSync(out,{recursive:true});
  const api=await request.newContext({baseURL:base});
  async function post(url,data){const r=await api.post(url,{data});assert.equal(r.status(),200,await r.text());return r.json()}
- if((await (await api.get('/api/setup/status')).json()).needed)await post('/api/setup',credentials);
- await post('/api/login',credentials);
+
+
  const unique=Date.now().toString(36),building='编排验收'+unique+'栋';
  const lift=await post('/api/elevators',{building_name:building,unit_name:'1单元',name:'1号梯',equipment_number:'ARCHIVE-TEST',brand:'测试品牌',model:'测试型号'});
  const event=await post('/api/events',{elevator_id:lift.id,type:'维修',title:'厅门检查与修复',occurred_on:'2026-10-20',started_at:'2026-10-20T09:00',ended_at:'2026-10-20T10:00',work_content:'检查门锁回路，调整厅门间隙。\n完成三次试运行，运行正常。',resolution:'已完成复核',workers:'测试人员',company:'测试维保单位',completed:true});
@@ -25,7 +25,7 @@ const credentials={username:process.env.ARCHIVE_EDITOR_USERNAME||'archive-ui',di
  const original=await (await api.get(`/api/events/${event.id}`)).json();
  const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});
  try{
-  const context=await browser.newContext({viewport:{width:1440,height:1000},storageState:await api.storageState()});
+  const context=await browser.newContext({viewport:{width:1440,height:1000}});
   await context.addInitScript(()=>{for(const name of ['toSorted','toReversed','toSpliced'])delete Array.prototype[name];delete Object.groupBy;delete Promise.withResolvers;if(globalThis.crypto)Object.defineProperty(globalThis.crypto,'randomUUID',{value:undefined,configurable:true})});
   const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(base+'/export');await page.getByText('选择电梯范围',{exact:true}).waitFor();
@@ -44,7 +44,7 @@ const credentials={username:process.env.ARCHIVE_EDITOR_USERNAME||'archive-ui',di
   await page.clock.setFixedTime(realTime);
   await page.locator('.el-radio-button').filter({hasText:'某部电梯'}).click();
   async function select(label,name){await page.locator('.el-select').filter({has:page.getByLabel(label,{exact:true})}).click();await page.getByRole('option',{name,exact:true}).click()}
-  await select('楼栋',building);await select('单元','1单元');await select('电梯',building+'1单元1号梯');
+  await select('楼栋',building);await select('单元','1单元');await select('电梯',building+'1口1号电梯');
   await page.getByLabel('开始日期',{exact:true}).fill('2026-10-01');await page.getByLabel('结束日期',{exact:true}).fill('2026-10-31');
   await page.screenshot({path:path.join(out,'01-range-desktop.png'),fullPage:true});
   const originalDownload=page.waitForEvent('download');await page.getByRole('button',{name:'直接导出原始档案',exact:true}).click();await (await originalDownload).saveAs(path.join(out,'原始工作档案.docx'));
@@ -58,14 +58,11 @@ const credentials={username:process.env.ARCHIVE_EDITOR_USERNAME||'archive-ui',di
   const firstHeading=page.locator('.archive-block[data-block-type=heading]').first();await firstHeading.locator('textarea').fill('一、现场检查与处理');
   const firstParagraph=page.locator('.archive-block[data-block-type=paragraph]').first();await firstParagraph.locator('textarea').fill('本次检查发现厅门间隙需要调整。\n现场完成处理后，运行恢复正常。');
   assert.equal(await firstHeading.locator('textarea').getAttribute('maxlength'),'300');assert.equal(await firstParagraph.locator('textarea').getAttribute('maxlength'),'10000');
-  // Unsaved navigation and logout both leave the editing scene intact when cancelled.
+  // Cancelling navigation preserves unsaved edits.
   await page.getByRole('navigation',{name:'主菜单'}).getByRole('button',{name:'工作记录',exact:true}).click();await page.getByRole('button',{name:'继续编辑',exact:true}).click();assert.equal(new URL(page.url()).pathname,'/export');
-  await page.getByRole('button',{name:'退出',exact:true}).click();await page.getByRole('button',{name:'继续编辑',exact:true}).click();assert.equal(await page.locator('#archive-title').inputValue(),title);assert.equal((await api.get('/api/me')).status(),200);
-  await page.route('**/api/logout',route=>route.fulfill({status:500,contentType:'application/json',body:JSON.stringify({detail:'测试退出失败'})}));
-  await page.getByRole('button',{name:'退出',exact:true}).click();await page.getByRole('button',{name:'放弃修改并继续',exact:true}).click();await page.getByText('测试退出失败',{exact:true}).waitFor();assert.match(await page.locator('.archive-save-state').textContent(),/未保存/);assert.equal(await page.locator('#archive-title').inputValue(),title);await page.unroute('**/api/logout');await page.getByText('测试退出失败',{exact:true}).waitFor({state:'hidden'});
   // Remove one existing photo, then insert it between text blocks from the source library.
   const removed=page.locator('.archive-block[data-block-type=image]').first();await removed.getByRole('button',{name:/移除第/}).click();await page.getByRole('button',{name:'移除此段',exact:true}).click();assert.equal(await page.locator('.archive-block[data-block-type=image]').count(),1);
-  await page.locator('.archive-insert-gap>button').nth(2).click();await page.locator('.archive-insert-menu').getByRole('button',{name:'图片',exact:true}).click();await page.getByRole('dialog',{name:'插入工作照片'}).waitFor();
+  await page.locator('.archive-insert-gap>button').nth(2).click();await page.locator('.archive-insert-menu').getByRole('button',{name:'图片',exact:true}).click();await page.getByRole('dialog',{name:'插入图片'}).waitFor();
   assert.equal(await page.locator('.archive-photo-grid button:disabled').count(),1);assert.equal(await page.locator('.archive-photo-grid').getByText(/cgi-bin/).count(),0);await page.waitForFunction(()=>!document.querySelector('.el-message'));await page.getByRole('dialog').screenshot({path:path.join(out,'02-photo-library-desktop.png')});
   await page.locator('.archive-photo-grid button:not(:disabled)').first().click();assert.equal(await page.locator('.archive-block[data-block-type=image]').count(),2);
   const firstImage=page.locator('.archive-block[data-block-type=image]').first();await firstImage.locator('.archive-caption-edit input').fill('调整门锁后进行运行复核');
@@ -107,7 +104,7 @@ const credentials={username:process.env.ARCHIVE_EDITOR_USERNAME||'archive-ui',di
   await page.setViewportSize({width:320,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'320px preview overflow');
   const finalOriginal=await (await api.get(`/api/events/${event.id}`)).json();assert.equal(finalOriginal.title,original.title);assert.equal(finalOriginal.work_content,original.work_content);assert.deepEqual(finalOriginal.attachments.map(x=>x.id),original.attachments.map(x=>x.id));
   assert.deepEqual(errors,[]);
-  fs.writeFileSync(path.join(out,'browser-result.json'),JSON.stringify({passed:true,browser:browser.version(),draftId:created.id,elevatorId:lift.id,eventId:event.id,checks:['scope/date generation','editable title/headings/paragraphs','interleaved source images and duplicate prevention','native drag and keyboard move','delete and undo','unsaved navigation, discard and logout cancellation', 'logout network failure preserves unsaved state','preview directory and Word ordering','draft save/reload','revision conflict preserves edits','real DOCX/ZIP downloads','390px edit and source photo insertion','320px preview no overflow','original records unchanged']},null,2));
+  fs.writeFileSync(path.join(out,'browser-result.json'),JSON.stringify({passed:true,browser:browser.version(),draftId:created.id,elevatorId:lift.id,eventId:event.id,checks:['scope/date generation','editable title/headings/paragraphs','interleaved source images and duplicate prevention','native drag and keyboard move','delete and undo','unsaved navigation cancellation','preview directory and Word ordering','draft save/reload','revision conflict preserves edits','real DOCX/ZIP downloads','390px edit and source photo insertion','320px preview no overflow','original records unchanged']},null,2));
   console.log('PASS: archive editor desktop/mobile, draft persistence, conflict, guard, photo insertion, ordering, preview, real Word/ZIP downloads, original ledger unchanged. Chrome '+browser.version());
  }finally{await browser.close();await api.dispose()}
 })().catch(e=>{console.error(e);process.exit(1)});

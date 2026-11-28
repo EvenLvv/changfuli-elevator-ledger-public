@@ -3,12 +3,14 @@ const {chromium,request}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
 const base=process.env.AUDIT_URL||'http://127.0.0.1:8767';
 const out=process.env.AUDIT_OUTPUT||path.resolve('outputs/export-format-20260930');
+const endpoint=new URL(base);
+assert.ok(['127.0.0.1','localhost','[::1]'].includes(endpoint.hostname)&&endpoint.port&&!['8765','8766'].includes(endpoint.port));
 (async()=>{
  const api=await request.newContext({baseURL:base});
  async function post(url,data){const r=await api.post(url,{data});assert.equal(r.status(),200,await r.text());return r.json()}
- const credentials={username:'format',display_name:'排版测试管理员',password:'format-browser-123'};
- if((await (await api.get('/api/setup/status')).json()).needed)await post('/api/setup',credentials);
- await post('/api/login',credentials);
+
+
+
  const lift=await post('/api/elevators',{building_name:'排序测试18栋',unit_name:'1单元',name:'1号梯'});
  const event=await post('/api/events',{elevator_id:lift.id,type:'维修',title:'照片按现场处理顺序排列',occurred_on:'2026-09-30',work_content:'处理前检查、现场维修、处理后复核。'});
  const photos=[];
@@ -18,7 +20,7 @@ const out=process.env.AUDIT_OUTPUT||path.resolve('outputs/export-format-20260930
  }
  const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});
  try{
-  const context=await browser.newContext({viewport:{width:1440,height:1000},storageState:await api.storageState()});
+  const context=await browser.newContext({viewport:{width:1440,height:1000}});
   const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(`${base}/events/${event.id}/edit`);
   await page.locator('.existing-file').first().getByRole('button',{name:'下移',exact:true}).waitFor();

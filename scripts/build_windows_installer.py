@@ -16,7 +16,9 @@ import tempfile
 from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_ID = 'ChangfuliElevatorLedger'
+APP_ID = 'ChangfuliElevatorDesktop'
+APP_ICON_ICO = 'desktop-app-2.0.ico'
+APP_ICON_PNG = 'desktop-app-2.0.png'
 PYTHON_VERSION = '3.12.10'
 PYTHON_SHA256 = '4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3'
 PTH_CONTENT = 'python312.zip\n.\nLib/site-packages\n..\nimport site\n'
@@ -75,7 +77,10 @@ def selected_wheels(wheelhouse, requirements):
         name = re.sub(r'[-_.]+', '-', metadata['Name'] or '').lower()
         if name not in requirements or metadata['Version'] != requirements[name]:
             continue
-        if not re.search(r'-(?:py3|py2\.py3)-none-any\.whl$|-cp312-cp312-win_amd64\.whl$', wheel.name):
+        _, python_tag, abi, platform = wheel.stem.rsplit('-', 3)
+        versions = python_tag.split('.')
+        portable = (abi, platform) == ('none', 'any') and ('py3' in versions or 'cp312' in versions)
+        if not portable and (python_tag, abi, platform) != ('cp312', 'cp312', 'win_amd64'):
             raise ValueError(f'Expected a Python 3.12 Windows x64 or pure Python wheel: {wheel.name}')
         if name in selected:
             raise ValueError(f'Multiple matching wheels for {name}; use a clean wheelhouse')
@@ -120,12 +125,18 @@ def collect_licenses(stage):
     (target / 'THIRD_PARTY_LICENSES.txt').write_text('\n'.join(lines), encoding='utf-8')
 
 
-def stage_application(python_zip, wheelhouse, output_dir, version):
+def stage_application(python_zip, wheelhouse, output_dir, version, seed_ledger=None):
     if sha256(python_zip) != PYTHON_SHA256:
         raise ValueError('The Python ZIP SHA256 does not match the official Python 3.12.10 x64 input')
     lock = ROOT / 'requirements.lock.txt'
     wheels = selected_wheels(wheelhouse, locked_requirements(lock))
-    for required in ('scripts/windows_launcher.py', 'frontend/dist/index.html', 'scripts/windows-app.ico', 'docs/WINDOWS_INSTALLER.md'):
+    for required in (
+        'scripts/windows_launcher.py',
+        'frontend/dist/index.html',
+        f'scripts/{APP_ICON_ICO}',
+        f'scripts/{APP_ICON_PNG}',
+        'docs/WINDOWS_INSTALLER.md',
+    ):
         if not (ROOT / required).is_file():
             raise ValueError(f'Build prerequisite missing: {required}')
     stage = Path(tempfile.mkdtemp(prefix='.stage-', dir=output_dir))
@@ -150,13 +161,19 @@ def stage_application(python_zip, wheelhouse, output_dir, version):
             copy_file(source, stage / 'backend' / source.name)
         copy_file(ROOT / 'scripts/windows_launcher.py', stage / 'scripts/windows_launcher.py')
         copy_tree(ROOT / 'frontend/dist', stage / 'frontend/dist')
-        copy_file(ROOT / 'scripts/windows-app.ico', stage / 'windows-app.ico')
+        copy_file(ROOT / f'scripts/{APP_ICON_ICO}', stage / APP_ICON_ICO)
+        copy_file(ROOT / f'scripts/{APP_ICON_PNG}', stage / APP_ICON_PNG)
         copy_file(lock, stage / 'requirements.lock.txt')
         copy_file(ROOT / 'docs/WINDOWS_INSTALLER.md', stage / 'docs/安装使用说明.txt')
         copy_file(ROOT / 'USER_GUIDE.md', stage / 'docs/USER_GUIDE.md')
+        if seed_ledger is not None:
+            copy_file(seed_ledger, stage / 'seed/official-ledger.xlsx')
         collect_licenses(stage)
+        forbidden_suffixes = {'.db', '.sqlite', '.sqlite3', '.log', '.pyc'}
+        if seed_ledger is None:
+            forbidden_suffixes.add('.xlsx')
         for path in stage.rglob('*'):
-            if path.is_file() and path.suffix.lower() in ('.db', '.sqlite', '.sqlite3', '.log', '.pyc'):
+            if path.is_file() and path.suffix.lower() in forbidden_suffixes:
                 raise ValueError(f'Runtime data or compiled host files entered staging: {path}')
         manifest = {'product': APP_ID, 'version': version, 'python_version': PYTHON_VERSION,
                     'python_zip_sha256': PYTHON_SHA256, 'requirements_sha256': sha256(lock),
@@ -184,7 +201,8 @@ def main():
     parser.add_argument('--python-zip', type=Path, required=True, help='Official python-3.12.10-embed-amd64.zip')
     parser.add_argument('--wheelhouse', type=Path, default=ROOT / 'wheelhouse')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'outputs/windows-installer')
-    parser.add_argument('--version', default='1.0.0')
+    parser.add_argument('--version', default='2.0.3')
+    parser.add_argument('--seed-ledger', type=Path, help='Explicitly copy this private workbook into the installer stage')
     parser.add_argument('--makensis', default=shutil.which('makensis'))
     parser.add_argument('--stage-only', action='store_true')
     args = parser.parse_args()
@@ -194,7 +212,7 @@ def main():
         parser.error('NSIS makensis was not found; install NSIS or pass --makensis')
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    stage = stage_application(args.python_zip.resolve(), args.wheelhouse.resolve(), output_dir, args.version)
+    stage = stage_application(args.python_zip.resolve(), args.wheelhouse.resolve(), output_dir, args.version, args.seed_ledger)
     if args.stage_only:
         print(stage)
         return

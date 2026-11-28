@@ -10,8 +10,6 @@ class QrNetworkTests(unittest.TestCase):
         self.context = isolated_app()
         self.client, self.paths = self.context.__enter__()
         self.addCleanup(self.context.__exit__, None, None, None)
-        self.client.post('/api/setup', json={'username':'admin','display_name':'管理员','password':'network-test-123'})
-        self.client.post('/api/login', json={'username':'admin','password':'network-test-123'})
         self.elevator = self.client.post('/api/elevators', json={'building_name':'18栋','unit_name':'1单元','name':'2号梯'}).json()['id']
         self.path = f'/api/elevators/{self.elevator}'
 
@@ -26,9 +24,7 @@ class QrNetworkTests(unittest.TestCase):
                 response=self.client.get(self.path+'/qr')
                 encode.assert_called_once_with(base+self.path.removeprefix('/api'))
                 Image.open(io.BytesIO(response.content)).verify()
-            self.client.post('/api/logout')
-            self.assertEqual(self.client.get(self.path+'/qr').status_code,401)
-            self.client.post('/api/login',json={'username':'admin','password':'network-test-123'})
+            self.assertEqual(self.client.get(self.path+'/qr').status_code,200)
             self.assertEqual(self.client.get('/api/network').json()['configured_url'],base)
         self.assertTrue(any(a['target']=='局域网访问地址' for a in self.client.get('/api/audit').json()))
 
@@ -46,13 +42,10 @@ class QrNetworkTests(unittest.TestCase):
             self.assertEqual(result['source'],'current')
             self.assertTrue(result['url'].startswith('http://192.168.1.20:8765/'))
 
-    def test_invalid_urls_and_staff_cannot_change_target(self):
+    def test_rejects_invalid_urls_and_accepts_local_operator_change(self):
         for value in ['http://127.0.0.1:8765','http://localhost:8765','http://0.0.0.0:8765','http://127.1','file:///etc/passwd','javascript:alert(1)','https://example.com','http://192.168.1.2:0','http://192.168.1.2:99999','http://192.168.1.2/path','http://user@192.168.1.2','http://192.168.1.2?q=x','http://192.168.1.2#x',None,42]:
             self.assertEqual(self.client.put('/api/network',json={'base_url':value}).status_code,400,value)
-        self.client.post('/api/users',json={'username':'staff','display_name':'工作人员','role':'staff','password':'network-staff-123'})
-        self.client.post('/api/logout')
-        self.client.post('/api/login',json={'username':'staff','password':'network-staff-123'})
-        self.assertEqual(self.client.put('/api/network',json={'base_url':'http://192.168.1.2:8765'}).status_code,403)
+        self.assertEqual(self.client.put('/api/network',json={'base_url':'http://192.168.1.2:8765'}).status_code,200)
         self.assertEqual(self.client.get('/api/network').status_code,200)
 
     def test_missing_or_deleted_elevator_cannot_print(self):

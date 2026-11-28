@@ -1,12 +1,12 @@
-# 昌福里社区27区党群物业服务站电梯管理台账 1.0
+# 昌福里社区电梯管理系统
 
 供物业站在一台 Windows 10 / 11 主机上运行，其他电脑或手机通过同一局域网的浏览器访问。记录一梯一档、维保故障维修和配件更换，集中保存照片附件，并导出 Word 工作档案或完整 ZIP 包。
 
-## Windows 安装版
+## Windows 安装版（版本 2.0.3）
 
-普通用户使用 EXE 安装包，安装后双击桌面“昌福里社区电梯管理系统”。运行环境与页面已内置，无需另装 Python、Node 或数据库，安装及使用无需联网。首次打开网页时自行设置管理员账号与密码，没有固定默认密码。
+安装 `ChangfuliElevatorDesktop-Setup-2.0.3-x64.exe` 时可自行选择程序安装目录（保留 1.x 旧版程序和数据）。安装完成后，双击桌面“昌福里社区电梯管理系统”即可打开主机桌面窗口（窗口标题显示 `昌福里社区电梯管理系统`），无需登录直接进入空工作台，在“电梯档案”中新增或批量导入资料即可开始使用。安装包内置 Python 和页面，默认不预置业务台账表格；桌面窗口需要 Microsoft Edge WebView2 Runtime。其他电脑或手机访问台账期间，请保持主机桌面窗口打开；关闭桌面窗口会安全停止主机服务。
 
-安装、停止、升级和换电脑步骤见 [Windows 安装版使用说明](docs/WINDOWS_INSTALLER.md)。安装版把资料保存在 `C:\ProgramData\ChangfuliElevatorLedger`（以系统 ProgramData 实际位置为准），与程序目录分开；卸载程序保留资料。下文 BAT 和开发命令仅适用于源码版。
+安装、自定义目录、1.x 旧数据自动复制、停止、升级和换电脑步骤见 [Windows 安装版使用说明](docs/WINDOWS_INSTALLER.md)。安装版将业务数据库、附件、导出、备份、日志与 WebView2 缓存保存在当前登录用户的 `%LOCALAPPDATA%\ChangfuliElevatorDesktop`，与程序目录完全分离；当本版尚无数据库或电梯表为空时，会依次在 `%PROGRAMDATA%\ChangfuliElevatorLedger`、`%LOCALAPPDATA%\ChangfuliElevatorLedger` 和 `%APPDATA%\ChangfuliElevatorLedger` 查找旧版台账并只读安全复制（保留原目录不删除）。卸载程序保留业务资料。下文 BAT 和开发命令仅适用于源码版。
 
 ## 技术栈
 
@@ -17,7 +17,11 @@
 
 ## 启动
 
-源码版先按 [INSTALL.md](INSTALL.md) 安装，然后在 Windows 主机双击 `启动电梯管理系统.bat`。浏览器打开 `http://127.0.0.1:8765`。首次进入先设置管理员账号与密码；**系统没有固定默认账号或密码**。
+源码版先按 [INSTALL.md](INSTALL.md) 安装，然后在 Windows 主机双击 `启动电梯管理系统.bat`。浏览器打开 `http://127.0.0.1:8766`。主机和同网设备均直接进入工作台，可编辑同一套台账。仅向可信的物业站内网开放服务。
+
+软件默认以空台账交付；若显式配置了可选的初始表格文件，空台账启动时可自动一次建账，失败会回滚并可在修正后重试。详情见 [首次建账说明](docs/WINDOWS_INSTALLER.md#可选的首次建账)。
+
+“工作记录”按上海日期倒序展示工作与系统操作，可从日历选日期，再按电梯或类型筛选。
 
 开发环境：
 
@@ -28,15 +32,15 @@ cd frontend && npm ci && npm run build
 cd .. && .venv/Scripts/python scripts/run.py
 ```
 
-macOS/Linux 第一步使用 `python3 -m venv .venv`，并把 `.venv/Scripts/python` 换成 `.venv/bin/python`。Windows 正式交付使用 Python 3.12 64位版本；`wheelhouse` 中的 Windows 依赖不能用于 macOS。开发时也可在 `frontend` 运行 `npm run dev`，API 代理到本机 8765 端口。
+macOS/Linux 第一步使用 `python3 -m venv .venv`，并把 `.venv/Scripts/python` 换成 `.venv/bin/python`。Windows 正式交付使用 Python 3.12 64位版本；`wheelhouse` 中的 Windows 依赖不能用于 macOS。开发时也可在 `frontend` 运行 `npm run dev`，API 代理到本机 8766 端口。
 
 ## 数据位置
 
-以下为数据根目录内的相对路径。EXE 安装版可从开始菜单“昌福里社区电梯管理系统 → 打开数据目录”进入；源码版默认在项目目录内。
+以下为数据根目录内的相对路径。EXE 安装版位于 `%LOCALAPPDATA%\ChangfuliElevatorDesktop`，可从开始菜单“昌福里社区电梯管理系统 → 打开数据目录”进入；源码版默认在项目目录内。
 
 | 目录 | 内容 |
 | --- | --- |
-| `data/elevator.db` | 电梯、记录、用户及日志索引 |
+| `data/elevator.db` | 电梯、工作记录、文稿、设置和操作日志 |
 | `storage/photos/` | 原始现场照片，不改写水印 |
 | `storage/attachments/` | Word、PDF、Excel 等原始附件 |
 | `exports/` | 已生成的 Word、ZIP |
@@ -47,19 +51,19 @@ macOS/Linux 第一步使用 `python3 -m venv .venv`，并把 `.venv/Scripts/pyth
 
 ## 局域网访问
 
-安装版在网页“系统管理 → 局域网访问与二维码”查看主机地址；源码版启动窗口也会列出 `http://本机IP:8765`。也可在 Windows 命令提示符输入 `ipconfig`，查找正在使用网卡的 IPv4 地址。其他终端须连接同一局域网，再在浏览器输入这个地址。若打不开，检查主机 Windows 防火墙是否允许 TCP 8765 的局域网入站访问。
+安装版在网页“系统设置 → 局域网访问与二维码”查看主机地址；源码版启动窗口也会列出 `http://本机IP:8766`。也可在 Windows 命令提示符输入 `ipconfig`，查找正在使用网卡的 IPv4 地址。其他终端须连接同一局域网，再在浏览器输入这个地址。若打不开，检查主机 Windows 防火墙是否允许 TCP 8766 的局域网入站访问。
 
 Win7 终端只需 Chrome 109 或 Edge 109 浏览器，不安装 Python、Node 或数据库。浏览器不可使用过旧的 IE。Win7 的真实设备验收尚需在部署现场完成。
 
-二维码统一使用管理员在“系统管理 → 局域网访问与二维码”保存的主机地址（例如 `http://192.168.1.20:8765`）。系统不会生成指向 `127.0.0.1` 或 `localhost` 的二维码；多网卡时需选择手机能访问的那一个。进入电梯档案，点“查看、下载与打印”可下载二维码或打印带电梯名称的标签。手机连接同一网络，扫码登录后直接进入对应电梯。
+二维码统一使用在“系统设置 → 局域网访问与二维码”保存的主机地址（例如 `http://192.168.1.20:8766`）。系统不会生成指向 `127.0.0.1` 或 `localhost` 的二维码；多网卡时需选择手机能访问的那一个。进入电梯档案，点“查看、下载与打印”可下载二维码或打印带电梯名称的标签。手机连接同一网络，扫码直接进入对应电梯。
 
 ## 备份与演示数据
 
-管理员在“系统管理 → 立即备份并下载”生成包含数据库及所有附件的 ZIP，并把下载文件另存到另一块磁盘。具体恢复步骤见 [BACKUP_AND_RESTORE.md](BACKUP_AND_RESTORE.md)。
+在“系统设置 → 立即备份并下载”生成包含数据库及所有附件的 ZIP，并把下载文件另存到另一块磁盘。具体恢复步骤见 [BACKUP_AND_RESTORE.md](BACKUP_AND_RESTORE.md)。
 
-首次建立管理员后，可运行 `.venv\Scripts\python.exe scripts\demo_data.py` 生成“演示18栋”测试资料；用相同命令加 `--remove` 移除。演示电梯若已有新工作记录，删除会被阻止。
+可运行 `.venv\Scripts\python.exe scripts\demo_data.py` 生成“演示18栋”测试资料；用相同命令加 `--remove` 移除。演示电梯若已有新工作记录，删除会被阻止。
 
-普通工作人员操作见 [USER_GUIDE.md](USER_GUIDE.md)。测试情况见 [TEST_REPORT.md](TEST_REPORT.md)，交付边界和现场验收表见 [AUDIT_REPORT.md](AUDIT_REPORT.md)。本版已完成本机回归，尚需 Windows 现场验收后再正式投入使用。
+日常操作见 [USER_GUIDE.md](USER_GUIDE.md)。测试情况见 [TEST_REPORT.md](TEST_REPORT.md)，交付边界和现场验收表见 [AUDIT_REPORT.md](AUDIT_REPORT.md)。本版已完成本机回归，尚需 Windows 现场验收后再正式投入使用。
 
 ## 2026-09-30 工作档案更新
 
@@ -67,6 +71,6 @@ Win7 终端只需 Chrome 109 或 Edge 109 浏览器，不安装 Python、Node �
 
 ## 2026-10-29 可编排工作文稿
 
-“档案导出”可以先从所选电梯和时间段生成编排稿，再修改标题、小标题、正文及图片说明，使用段间插入、拖动或上下移动调整内容。图片从本稿来源工作记录中选择，图号根据最终顺序自动生成。草稿保存在主机数据库，具有权限检查和并发修改保护；文稿编辑不修改原始台账。预览与 Word 使用相同的内容顺序，ZIP 保留来源资料的全部原件。固定版式的原始档案导出继续保留。
+“工作档案导出”可以先从所选电梯和时间段生成编排稿，再修改标题、小标题、正文及图片说明，使用段间插入、拖动或上下移动调整内容。图片从本稿来源工作记录中选择，图号根据最终顺序自动生成。草稿保存在主机数据库，各终端共享草稿，并发保存时检查版本；文稿编辑不修改原始台账。预览与 Word 使用相同的内容顺序，ZIP 保留来源资料的全部原件。固定版式的原始档案导出继续保留。
 
-升级前先在系统管理中备份并另存。关闭原服务窗口，更新程序及 `frontend/dist/`，保留原有 `data/` 和 `storage/`，再启动系统；数据库会自动增加草稿表。重新打开页面后，“档案导出”应出现“生成编排稿”入口。详细操作见 [USER_GUIDE.md](USER_GUIDE.md)。
+升级前先在系统设置中备份并另存。关闭原服务窗口，更新程序及 `frontend/dist/`，保留原有 `data/` 和 `storage/`，再启动系统；数据库会自动增加草稿表。重新打开页面后，“工作档案导出”应出现“生成编排稿”入口。详细操作见 [USER_GUIDE.md](USER_GUIDE.md)。

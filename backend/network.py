@@ -14,7 +14,7 @@ def lan_ip(value):
 
 
 def validate_base(value):
-    message = '请填写主机的局域网地址，例如 http://192.168.1.20:8765；不能填写 127.0.0.1 或 localhost'
+    message = '请填写主机的局域网地址，例如 http://192.168.1.20:8766；不能填写 127.0.0.1 或 localhost'
     if not isinstance(value, str) or len(value) > 200:
         raise ValueError(message)
     value = value.strip().rstrip('/')

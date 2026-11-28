@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import calendar
 import hashlib
 import io
 import json
 import logging
 import mimetypes
+import os
 import re
-import secrets
 import sqlite3
 import uuid
 import zipfile
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -22,22 +24,35 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from .db import BACKUPS, COMMUNITY, DB, EXPORTS, LOGS, ROOT, STORAGE, audit, connect, get_one, init_db, must_exist, now, password_hash, rows, verify_password
+from .db import BACKUPS, COMMUNITY, DATA, DB, EXPORTS, LOGS, ROOT, STORAGE, audit, connect, get_one, init_db, must_exist, now, rows, SHANGHAI
 from .exporter import get_data, make_export
-from .drafts import draft_detail, draft_metadata, initial_blocks, make_draft_export, source_attachments, source_status
+from .drafts import (DRAFT_PHOTO_FOLDER, draft_detail, draft_metadata, draft_photo_path, draft_photos,
+                     initial_blocks, make_draft_export, source_attachments, source_status)
 from .backup import create_backup
 from .archive_excel import workbook_bytes, read_records
+from .official_ledger import OfficialWorkbook, reconcile
+from .timeline import timeline
+from .location import active_elevator_labels, add_elevator_labels, archive_number
 from .network import addresses, validate_base
 
-init_db()
+@asynccontextmanager
+async def lifespan(app):
+    init_db()
+    seed_empty_ledger(actor())
+    yield
+
+
 logging.basicConfig(filename=LOGS / "system.log", level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s", encoding="utf-8")
-app = FastAPI(title=COMMUNITY + "电梯管理台账", docs_url=None, redoc_url=None)
+app = FastAPI(title="昌福里社区电梯管理系统", version="2.0.3", docs_url=None, redoc_url=None, lifespan=lifespan)
 TYPES = {"日常维保", "故障", "维修", "配件更换", "检验/检查", "资料补充", "其他"}
 STATUSES = {"正常", "故障", "维修中", "停梯", "待处理"}
 CATEGORIES = {"工作现场照片", "维修记录", "维保记录", "报价单", "业主签字单", "检测报告", "验收资料", "其他"}
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf", ".doc", ".docx", ".xls", ".xlsx"}
+MAX_LEDGER = 5 * 1024 * 1024
 MAX_UPLOAD = 20 * 1024 * 1024
+PHOTO_FORMATS = {'.jpg': 'JPEG', '.jpeg': 'JPEG', '.png': 'PNG', '.webp': 'WEBP'}
+MAX_DRAFT_UPLOAD = 100 * 1024 * 1024
 
 
 @app.exception_handler(RequestValidationError)
@@ -110,23 +125,9 @@ def flag(value, label):
     return int(value)
 
 
-def actor(request: Request):
-    token = request.cookies.get("elevator_session")
-    if not token:
-        error("请先登录", 401)
-    digest = hashlib.sha256(token.encode()).hexdigest()
+def actor():
     with connect() as db:
-        user = get_one(db, """SELECT u.id,u.username,u.display_name,u.role FROM sessions s
-          JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.active=1""", (digest, now()))
-    if not user:
-        error("登录已过期，请重新登录", 401)
-    return user
-
-
-def admin(user=Depends(actor)):
-    if user["role"] != "admin":
-        error("只有管理员可以进行此操作", 403)
-    return user
+        return get_one(db, "SELECT id,display_name FROM users WHERE username=''")
 
 
 @app.middleware("http")
@@ -139,7 +140,7 @@ async def guard(request: Request, call_next):
         return await call_next(request)
     except Exception:
         logging.exception("未处理的请求错误 %s %s", request.method, request.url.path)
-        return JSONResponse({"detail": "操作失败，请稍后重试；如持续出现，请联系管理员查看日志"}, status_code=500)
+        return JSONResponse({"detail": "操作失败，请稍后重试；如持续出现，请查看系统日志"}, status_code=500)
 
 
 @app.get("/api/health")
@@ -149,117 +150,7 @@ def health():
 
 @app.get("/api/setup/status")
 def setup_status():
-    with connect() as db:
-        return {"needed": db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0}
-
-
-@app.post("/api/setup")
-def setup(request: Request, data: dict = Body(...)):
-    if not request.client or request.client.host not in {"127.0.0.1", "::1"}:
-        error("请在服务器主机上完成首次管理员设置", 403)
-    username = require_text(data.get("username"), "账号", 40)
-    display = require_text(data.get("display_name"), "姓名", 40)
-    password = str(data.get("password") or "")
-    if len(password) < 10:
-        error("密码至少10位")
-    with connect() as db:
-        db.execute("BEGIN IMMEDIATE")
-        if db.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
-            error("管理员已设置", 409)
-        db.execute("INSERT INTO users(username,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?)",
-                   (username, display, password_hash(password), "admin", now()))
-    return {"ok": True}
-
-
-@app.post("/api/login")
-def login(data: dict = Body(...)):
-    with connect() as db:
-        user = get_one(db, "SELECT * FROM users WHERE username=? AND active=1", (str(data.get("username") or ""),))
-        if not user or not verify_password(str(data.get("password") or ""), user["password_hash"]):
-            error("账号或密码错误", 401)
-        token = secrets.token_urlsafe(32)
-        expiry = (datetime.now().astimezone() + timedelta(days=7)).isoformat(timespec="seconds")
-        db.execute("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)",
-                   (hashlib.sha256(token.encode()).hexdigest(), user["id"], expiry))
-    response = JSONResponse({"id": user["id"], "display_name": user["display_name"], "role": user["role"]})
-    response.set_cookie("elevator_session", token, httponly=True, samesite="strict", max_age=604800)
-    return response
-
-
-@app.post("/api/logout")
-def logout(request: Request, user=Depends(actor)):
-    token = request.cookies.get("elevator_session", "")
-    with connect() as db:
-        db.execute("DELETE FROM sessions WHERE token_hash=?", (hashlib.sha256(token.encode()).hexdigest(),))
-    response = JSONResponse({"ok": True})
-    response.delete_cookie("elevator_session")
-    return response
-
-
-@app.get("/api/me")
-def me(user=Depends(actor)):
-    return user
-
-
-@app.get("/api/users")
-def list_users(user=Depends(admin)):
-    with connect() as db:
-        return rows(db.execute("SELECT id,username,display_name,role,active,created_at FROM users ORDER BY id"))
-
-
-@app.post("/api/users")
-def create_user(data: dict = Body(...), user=Depends(admin)):
-    username = require_text(data.get("username"), "账号", 40)
-    display = require_text(data.get("display_name"), "姓名", 40)
-    password = str(data.get("password") or "")
-    if len(password) < 10:
-        error("密码至少10位")
-    role = data.get("role", "staff")
-    if not isinstance(role, str) or role not in {"admin", "staff"}:
-        error("角色不正确")
-    with connect() as db:
-        try:
-            cursor = db.execute("INSERT INTO users(username,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?)",
-                                (username, display, password_hash(password), role, now()))
-        except sqlite3.IntegrityError:
-            error("账号已存在", 409)
-        audit(db, user["id"], "新增", "用户", cursor.lastrowid, after={"username": username, "role": role})
-    return {"id": cursor.lastrowid}
-
-
-@app.put("/api/users/{user_id}")
-def edit_user(user_id: int, data: dict = Body(...), user=Depends(admin)):
-    with connect() as db:
-        db.execute("BEGIN IMMEDIATE")
-        # The actor may have been disabled/demoted while waiting for the write lock.
-        if not get_one(db, "SELECT id FROM users WHERE id=? AND role='admin' AND active=1", (user["id"],)):
-            error("管理员权限已变化，请重新登录", 403)
-        before = get_one(db, "SELECT id,username,display_name,role,active FROM users WHERE id=?", (user_id,))
-        if not before:
-            error("找不到用户", 404)
-        display = require_text(data.get("display_name", before["display_name"]), "姓名", 40)
-        role = data.get("role", before["role"])
-        active = flag(data.get("active", before["active"]), "账号状态")
-        if not isinstance(role, str) or role not in {"admin", "staff"}:
-            error("角色不正确")
-        if user_id == user["id"] and (role != "admin" or not active):
-            error("不能取消自己的管理员权限")
-        if before["role"] == "admin" and before["active"] and (role != "admin" or not active):
-            active_admins = db.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND active=1").fetchone()[0]
-            if active_admins <= 1:
-                error("必须保留至少一位启用的管理员")
-        password = data.get("password")
-        if password and len(str(password)) < 10:
-            error("新密码至少10位")
-        db.execute("UPDATE users SET display_name=?,role=?,active=? WHERE id=?", (display, role, active, user_id))
-        if not active:
-            db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
-        if password:
-            db.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash(str(password)), user_id))
-            db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
-        audit(db, user["id"], "修改", "用户", user_id, before=before,
-              after={"display_name": display, "role": role, "active": active, "password_changed": bool(password)})
-    return {"ok": True}
+    return {"needed": False}
 
 
 @app.get("/api/buildings")
@@ -272,24 +163,30 @@ def buildings(user=Depends(actor)):
 
 
 @app.post("/api/buildings")
-def add_building(data: dict = Body(...), user=Depends(admin)):
+def add_building(data: dict = Body(...), user=Depends(actor)):
     name = require_text(data.get("name"), "楼栋名称", 40)
     with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        if find_archive_name(db, 'buildings', name, digits_only=True) is not None:
+            error('楼栋名称或编号已存在（含已删除资料，可在系统设置中恢复）', 409)
         try:
             cursor = db.execute("INSERT INTO buildings(name) VALUES(?)", (name,))
         except sqlite3.IntegrityError:
-            error("楼栋名称已存在（含已删除资料，可在系统管理中恢复）", 409)
+            error("楼栋名称已存在（含已删除资料，可在系统设置中恢复）", 409)
         audit(db, user["id"], "新增", "楼栋", cursor.lastrowid, after={"name": name})
     return {"id": cursor.lastrowid}
 
 
 @app.put("/api/buildings/{building_id}")
-def edit_building(building_id: int, data: dict = Body(...), user=Depends(admin)):
+def edit_building(building_id: int, data: dict = Body(...), user=Depends(actor)):
     name = require_text(data.get("name"), "楼栋名称", 40)
     with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
         before = must_exist(db, "buildings", building_id)
         if not before:
             error("找不到楼栋", 404)
+        if name != before['name'] and find_archive_name(db, 'buildings', name, digits_only=True, exclude_id=building_id) is not None:
+            error('楼栋名称或编号已存在', 409)
         try:
             db.execute("UPDATE buildings SET name=? WHERE id=?", (name, building_id))
         except sqlite3.IntegrityError:
@@ -299,7 +196,7 @@ def edit_building(building_id: int, data: dict = Body(...), user=Depends(admin))
 
 
 @app.delete("/api/buildings/{building_id}")
-def delete_building(building_id: int, user=Depends(admin)):
+def delete_building(building_id: int, user=Depends(actor)):
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         before = must_exist(db, "buildings", building_id)
@@ -327,37 +224,43 @@ def units(building_id: Optional[int] = None, user=Depends(actor)):
 
 
 @app.post("/api/units")
-def add_unit(data: dict = Body(...), user=Depends(admin)):
+def add_unit(data: dict = Body(...), user=Depends(actor)):
     name = require_text(data.get("name"), "单元名称", 40)
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        if not must_exist(db, "buildings", positive_int(data.get("building_id"), "楼栋", 1)):
+        building_id = positive_int(data.get('building_id'), '楼栋', 1)
+        if not must_exist(db, 'buildings', building_id):
             error("请选择已有楼栋")
+        if find_archive_name(db, 'units', name, building_id, digits_only=True) is not None:
+            error('该楼栋已有同号或同名单元（含已删除资料，可在系统设置中恢复）', 409)
         try:
-            cursor = db.execute("INSERT INTO units(building_id,name) VALUES(?,?)", (data["building_id"], name))
+            cursor = db.execute("INSERT INTO units(building_id,name) VALUES(?,?)", (building_id, name))
         except sqlite3.IntegrityError:
-            error("该楼栋已有同名单元（含已删除资料，可在系统管理中恢复）", 409)
+            error("该楼栋已有同名单元（含已删除资料，可在系统设置中恢复）", 409)
         audit(db, user["id"], "新增", "单元", cursor.lastrowid, after={"name": name})
     return {"id": cursor.lastrowid}
 
 
 @app.put("/api/units/{unit_id}")
-def edit_unit(unit_id: int, data: dict = Body(...), user=Depends(admin)):
+def edit_unit(unit_id: int, data: dict = Body(...), user=Depends(actor)):
     name = require_text(data.get("name"), "单元名称", 40)
     with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
         before = must_exist(db, "units", unit_id)
         if not before:
             error("找不到单元", 404)
+        if name != before['name'] and find_archive_name(db, 'units', name, before['building_id'], digits_only=True, exclude_id=unit_id) is not None:
+            error('该楼栋已有同号或同名单元（含已删除资料，可在系统设置中恢复）', 409)
         try:
             db.execute("UPDATE units SET name=? WHERE id=?", (name, unit_id))
         except sqlite3.IntegrityError:
-            error("该楼栋已有同名单元（含已删除资料，可在系统管理中恢复）", 409)
+            error("该楼栋已有同名单元（含已删除资料，可在系统设置中恢复）", 409)
         audit(db, user["id"], "修改", "单元", unit_id, before=before, after={"name": name})
     return {"ok": True}
 
 
 @app.delete("/api/units/{unit_id}")
-def delete_unit(unit_id: int, user=Depends(admin)):
+def delete_unit(unit_id: int, user=Depends(actor)):
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         before = must_exist(db, "units", unit_id)
@@ -377,7 +280,7 @@ ELEVATOR_FIELDS = ("internal_number", "equipment_number", "brand", "model", "man
 def elevator_values(data):
     values = {field: optional_text(data.get(field), 500) for field in ELEVATOR_FIELDS}
     for field, label in (("manufactured_on", "出厂日期"), ("started_on", "投用日期"),
-                         ("inspection_on", "下次年检日期"), ("maintenance_due_on", "下次维保日期")):
+                         ("inspection_on", "年检日期"), ("maintenance_due_on", "下次维保日期")):
         values[field] = day(values[field], label)
     values["status"] = values["status"] or "正常"
     if values["status"] not in STATUSES:
@@ -385,7 +288,27 @@ def elevator_values(data):
     return values
 
 
-def resolve_unit(db, data, user):
+def find_archive_name(db, table, name, parent=None, *, digits_only=False, exclude_id=None):
+    scope = {'buildings': '', 'units': ' WHERE building_id=?', 'elevators': ' WHERE unit_id=?'}[table]
+    sql = f'SELECT id,name,deleted_at FROM {table}' + scope
+    args = (parent,) if scope else ()
+    number = archive_number(table, name)
+    if not digits_only or number is None:
+        name_clause = ' AND name=?' if scope else ' WHERE name=?'
+        exact = db.execute(sql + name_clause, (*args, name)).fetchone()
+        if exact is not None and exact['id'] != exclude_id:
+            return exact
+    if number is None:
+        return None
+    matches = [item for item in db.execute(sql, args)
+               if item['id'] != exclude_id and archive_number(table, item['name']) == number]
+    if len(matches) > 1:
+        names = '、'.join(item['name'] for item in matches)
+        error(f'{name}对应多条旧档案（{names}），请先核对楼栋、单元或电梯名称', 409)
+    return next(iter(matches), None)
+
+
+def resolve_unit(db, data, user, *, digits_only=False, workbook_names=None, current_building_id=None):
     if 'building_name' not in data and 'unit_name' not in data:
         unit_id = positive_int(data.get('unit_id'), '单元', 1)
         unit = must_exist(db, 'units', unit_id)
@@ -395,31 +318,44 @@ def resolve_unit(db, data, user):
     building = require_text(data.get('building_name'), '楼栋', 40)
     unit = require_text(data.get('unit_name'), '单元', 40)
     for table, name, parent in [('buildings', building, None), ('units', unit, 'building_id')]:
-        condition = 'name=?' + (' AND building_id=?' if parent else '')
-        args = (name, building_id) if parent else (name,)
-        existing = get_one(db, f'SELECT * FROM {table} WHERE {condition}', args)
+        label = '单元' if parent else '楼栋'
+        if not parent and current_building_id is not None:
+            existing = get_one(db, 'SELECT id,name,deleted_at FROM buildings WHERE id=?', (current_building_id,))
+            if existing is None:
+                error('找不到当前楼栋，请刷新页面后重新编辑', 409)
+        else:
+            existing = find_archive_name(db, table, name, building_id if parent else None, digits_only=digits_only)
         if existing:
-            if existing['deleted_at']:
-                error(f'{name}已删除，请先在系统管理中恢复', 409)
+            if existing['deleted_at'] is not None:
+                error(f"{existing['name']}已删除，请先在系统设置中恢复", 409)
             item_id = existing['id']
         else:
             statement = 'INSERT INTO units(name,building_id) VALUES(?,?)' if parent else 'INSERT INTO buildings(name) VALUES(?)'
+            args = (name, building_id) if parent else (name,)
             item_id = db.execute(statement, args).lastrowid
-            audit(db, user['id'], '新增', '单元' if parent else '楼栋', item_id, after={'name':name})
+            audit(db, user['id'], '新增', label, item_id, after={'name':name})
+        if workbook_names is not None:
+            # IDs allocated by this batch can differ between preview and confirmation.
+            first_name, _ = workbook_names.setdefault((table, item_id), (name, item_id if existing else None))
+            if name != first_name:
+                error(f'表格中{label}“{first_name}”和“{name}”匹配到同一{label}，请核对原始位置名称', 409)
         if not parent:
             building_id = item_id
     return item_id
 
 
-def insert_elevator(db, data, user):
+def insert_elevator(db, data, user, *, unit_id=None, digits_only=False):
     name = require_text(data.get('name'), '电梯名称', 50)
     values = elevator_values(data)
-    unit_id = resolve_unit(db, data, user)
+    if unit_id is None:
+        unit_id = resolve_unit(db, data, user, digits_only=digits_only)
+    if find_archive_name(db, 'elevators', name, unit_id, digits_only=digits_only) is not None:
+        error('该单元已有同号或同名电梯（含已删除资料，可在系统设置中恢复）', 409)
     payload = {'unit_id':unit_id, 'name':name, **values}
     try:
         cursor = db.execute(f"INSERT INTO elevators({','.join(payload)}) VALUES({','.join('?' for _ in payload)})", list(payload.values()))
     except sqlite3.IntegrityError:
-        error('该单元已有同名电梯（含已删除资料，可在系统管理中恢复）', 409)
+        error('该单元已有同名电梯（含已删除资料，可在系统设置中恢复）', 409)
     audit(db, user['id'], '新增', '电梯', cursor.lastrowid, after=payload)
     return cursor.lastrowid
 
@@ -428,50 +364,285 @@ def insert_elevator(db, data, user):
 def export_archives(template: bool = False, building_id: Optional[int] = None, unit_id: Optional[int] = None, user=Depends(actor)):
     from urllib.parse import quote
     records = [] if template else elevators(building_id, unit_id, user)
-    filename = COMMUNITY + '_电梯档案' + ('导入模板' if template else '_' + date.today().strftime('%Y%m%d')) + '.xlsx'
-    return Response(workbook_bytes(records), media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    filename = COMMUNITY + '_电梯档案' + ('导入模板' if template else '_' + datetime.now(SHANGHAI).date().strftime('%Y%m%d')) + '.xlsx'
+    raw = workbook_bytes(records)
+    if not template:
+        with connect() as db:
+            audit(db, user['id'], '导出', '电梯档案', filename, after={'summary': f'{len(records)} 部电梯'})
+    return Response(raw, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                     headers={'Content-Disposition': "attachment; filename*=UTF-8''" + quote(filename)})
 
 
+def insert_official_elevator(db, data, user):
+    unit_id = resolve_unit(db, data, user, digits_only=True)
+    name = data['name']
+    if find_archive_name(db, 'elevators', name, unit_id) is not None:
+        name = f"{name}（{data['equipment_number'] or data['internal_number']}）"
+    lift_id = insert_elevator(db, {**data, 'name': name}, user, unit_id=unit_id)
+    return db.execute("""SELECT e.*, u.name unit_name, b.name building_name, NULL inactive FROM elevators e
+        JOIN units u ON u.id=e.unit_id JOIN buildings b ON b.id=u.building_id WHERE e.id=?""", (lift_id,)).fetchone()
+
+
+def audit_import(db, user, target, elevators, events=0, unmatched=0):
+    audit(db, user['id'], '导入', target, None,
+          after={'summary': f'新增 {elevators} 部电梯、{events} 条工作记录，{unmatched} 条待核验'})
+
+
+def _find_seed_ledger_path():
+    configured = Path(os.environ.get('ELEVATOR_SEED_LEDGER', ''))
+    paths = [configured] if configured.is_absolute() else []
+    paths.extend([ROOT / 'seed/official-ledger.xlsx', DATA / 'seed/official-ledger.xlsx'])
+    return next((p for p in paths if p.is_file()), None)
+
+
+def _sanitize_seed_error(text):
+    cleaned = re.sub(r'（[^）]*）|\([^)]*\)', '', str(text or '')).strip()
+    cleaned = re.sub(r'[\u4e00-\u9fffA-Za-z]{0,4}[A-Za-z]-[0-9A-Za-z-]+', '登记证号已隐去', cleaned)
+    cleaned = re.sub(r'梯[0-9A-Za-z\u4e00-\u9fff-]{4,}', '登记证号已隐去', cleaned)
+    return cleaned[:200] or '无法读取或写入初始台账'
+
+
+def _read_seed_report_file():
+    report_file = LOGS / 'seed-import-report.json'
+    if not report_file.is_file():
+        return None
+    try:
+        data = json.loads(report_file.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return {'committed': False, 'error': '初始台账导入报告无法读取'}
+
+
+def seed_status_data(db):
+    elevator_count = db.execute('SELECT COUNT(*) FROM elevators WHERE deleted_at IS NULL').fetchone()[0]
+    event_count = db.execute(
+        'SELECT COUNT(*) FROM events v JOIN elevators e ON e.id=v.elevator_id '
+        'WHERE v.deleted_at IS NULL AND e.deleted_at IS NULL'
+    ).fetchone()[0]
+    total_elevators = db.execute('SELECT COUNT(*) FROM elevators').fetchone()[0]
+    saved_row = get_one(db, "SELECT value FROM system_settings WHERE key='official_ledger_imported'")
+    saved = None
+    if saved_row:
+        try:
+            parsed = json.loads(saved_row['value'])
+            if isinstance(parsed, dict):
+                saved = parsed
+        except ValueError:
+            saved = None
+    report = _read_seed_report_file()
+    report_rel = 'logs/seed-import-report.json'
+    seed_present = _find_seed_ledger_path() is not None
+
+    if not seed_present:
+        return {
+            'status': 'ready' if total_elevators > 0 else 'empty',
+            'seed_present': False,
+            'committed': False,
+            'elevator_count': elevator_count,
+            'event_count': event_count,
+            'seed_elevators': 0,
+            'seed_events': 0,
+            'report_path': report_rel,
+            'error': '',
+            'message': '',
+        }
+
+    if total_elevators > 0:
+        if saved and saved.get('committed') is True:
+            seed_elevators = int(saved.get('added') or 0)
+            seed_events = int(saved.get('events_added') or 0)
+            return {
+                'status': 'imported',
+                'seed_present': True,
+                'committed': True,
+                'elevator_count': elevator_count,
+                'event_count': event_count,
+                'seed_elevators': seed_elevators,
+                'seed_events': seed_events,
+                'report_path': report_rel,
+                'error': '',
+                'message': (
+                    f'已导入预置台账：{seed_elevators} 部电梯、{seed_events} 条工作记录'
+                    f'（当前在册 {elevator_count} 部电梯、{event_count} 条工作记录）。'
+                ),
+            }
+        return {
+            'status': 'ready',
+            'seed_present': True,
+            'committed': False,
+            'elevator_count': elevator_count,
+            'event_count': event_count,
+            'seed_elevators': 0,
+            'seed_events': 0,
+            'report_path': report_rel,
+            'error': '',
+            'message': '',
+        }
+
+    if report and report.get('committed') is False:
+        err = _sanitize_seed_error(report.get('error') or '无法读取或写入初始台账')
+        return {
+            'status': 'failed',
+            'seed_present': True,
+            'committed': False,
+            'elevator_count': 0,
+            'event_count': 0,
+            'seed_elevators': 0,
+            'seed_events': 0,
+            'report_path': report_rel,
+            'error': err,
+            'message': f'初始台账导入失败（{err}）。请查看数据目录下的 {report_rel}，处理后重新打开程序将自动重试。',
+        }
+    return {
+        'status': 'pending',
+        'seed_present': True,
+        'committed': False,
+        'elevator_count': 0,
+        'event_count': 0,
+        'seed_elevators': 0,
+        'seed_events': 0,
+        'report_path': report_rel,
+        'error': '',
+        'message': '',
+    }
+
+
+@app.get('/api/seed-status')
+def get_seed_status(user=Depends(actor)):
+    with connect() as db:
+        db.execute('BEGIN')
+        return seed_status_data(db)
+
+
+def seed_empty_ledger(user):
+    encoded = None
+    try:
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM elevators LIMIT 1').fetchone():
+                return
+            path = _find_seed_ledger_path()
+            if path is None:
+                db.execute("DELETE FROM system_settings WHERE key='official_ledger_imported'")
+                return
+            with path.open('rb') as stream:
+                raw = stream.read(MAX_LEDGER + 1)
+            if len(raw) > MAX_LEDGER:
+                raise ValueError('表格超过5MB')
+            workbook = read_records(raw)
+            if not isinstance(workbook, OfficialWorkbook):
+                raise ValueError('初始台账须使用正式双表格式')
+            report = reconcile(db, workbook, user, insert_official_elevator, insert_event)
+            if not db.execute('SELECT 1 FROM elevators LIMIT 1').fetchone():
+                raise ValueError('初始台账未包含有效电梯档案')
+            audit_import(db, user, '正式特种设备台账', report['added'], report['events_added'], len(report['unmatched']))
+            summary = {key: report[key] for key in ('added', 'skipped', 'events_added', 'events_skipped',
+                                                     'templates_skipped', 'warnings', 'unmatched')}
+            summary['committed'] = True
+            encoded = json.dumps(summary, ensure_ascii=False, indent=2)
+            db.execute(
+                "INSERT INTO system_settings(key,value) VALUES('official_ledger_imported',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (encoded,),
+            )
+    except Exception as exc:
+        # Keep the workspace available and retry on the next startup whenever the elevator table is empty.
+        raw_detail = exc.detail if isinstance(exc, HTTPException) else str(exc) if isinstance(exc, ValueError) else '无法读取或写入初始台账'
+        detail = _sanitize_seed_error(raw_detail)
+        encoded = json.dumps({'committed': False, 'error': detail}, ensure_ascii=False)
+        try:
+            with connect() as cleanup_db:
+                cleanup_db.execute('BEGIN IMMEDIATE')
+                if not cleanup_db.execute('SELECT 1 FROM elevators LIMIT 1').fetchone():
+                    cleanup_db.execute("DELETE FROM system_settings WHERE key='official_ledger_imported'")
+        except sqlite3.Error:
+            logging.exception('无法清理失败的初始台账导入标记')
+    if encoded is not None:
+        try:
+            (LOGS / 'seed-import-report.json').write_text(encoded, encoding='utf-8')
+        except OSError:
+            logging.exception('无法写入初始台账导入报告')
+
+
 @app.post('/api/elevator-archives/import')
-async def import_archives(file: UploadFile = File(...), dry_run: bool = True, user=Depends(admin)):
+async def import_archives(request: Request, file: UploadFile = File(...), dry_run: bool = True, user=Depends(actor)):
     if Path(file.filename or '').suffix.lower() != '.xlsx':
-        error('请选择.xlsx格式的电梯档案模板')
-    raw = await file.read(5 * 1024 * 1024 + 1)
+        error('请选择.xlsx格式的电梯档案或正式双表台账')
+    # FastAPI's Form parameter normalizes an explicitly empty field to its default.
+    preview_token = (await request.form()).get('preview_token')
+    raw = await file.read(MAX_LEDGER + 1)
     await file.close()
-    if not raw or len(raw) > 5 * 1024 * 1024:
+    if not raw or len(raw) > MAX_LEDGER:
         error('表格需大于0且不超过5MB')
     try:
         records = read_records(raw)
     except Exception as exc:
         error(str(exc) if isinstance(exc, ValueError) else '无法读取表格，请使用下载的.xlsx模板')
+    if isinstance(records, OfficialWorkbook):
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            try:
+                report = reconcile(db, records, user, insert_official_elevator, insert_event)
+            except (ValueError, HTTPException) as exc:
+                db.rollback()
+                message = exc.detail if isinstance(exc, HTTPException) else str(exc)
+                return {'valid': False, 'errors': [message], 'error_count': 1, 'added': 0, 'skipped': 0, 'rows': []}
+            digest = hashlib.sha256(raw)
+            digest.update(json.dumps(report).encode())
+            token = digest.hexdigest()
+            if dry_run:
+                db.rollback()
+            elif preview_token is not None and preview_token != token:
+                error('预览后的实际位置或导入结果已变化，请重新检查表格', 409)
+            else:
+                audit_import(db, user, '正式特种设备台账', report['added'], report['events_added'], len(report['unmatched']))
+            return dict(report, committed=not dry_run, preview_token=token if dry_run else None)
     errors, preview, seen = [], [], set()
+    workbook_names = {}
+    plan = []
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
         for number, data in records:
             try:
                 name = require_text(data.get('name'), '电梯名称', 50)
                 elevator_values(data)
-                key = (require_text(data.get('building_name'), '楼栋', 40), require_text(data.get('unit_name'), '单元', 40), name)
+                unit_id = resolve_unit(db, data, user, workbook_names=workbook_names)
+                existing = find_archive_name(db, 'elevators', name, unit_id)
+                key = (unit_id, existing['name'] if existing else name)
                 if key in seen:
                     error('表格内重复出现同一部电梯')
                 seen.add(key)
-                unit_id = resolve_unit(db, data, user)
-                existing = get_one(db, 'SELECT id,deleted_at FROM elevators WHERE unit_id=? AND name=?', (unit_id,name))
                 if existing and existing['deleted_at']:
-                    error('该电梯已删除，请先在系统管理中恢复')
+                    error('该电梯已删除，请先在系统设置中恢复')
                 action = '跳过' if existing else '新增'
-                if not existing:
-                    insert_elevator(db, {**data, 'unit_id':unit_id}, user)
-                preview.append({'row':number,'place':' / '.join(key),'action':action})
+                elevator_id = existing['id'] if existing else insert_elevator(db, data, user, unit_id=unit_id)
+                target = db.execute('''SELECT b.id building_id,b.name building_name,u.name unit_name,e.name FROM elevators e
+                    JOIN units u ON u.id=e.unit_id JOIN buildings b ON b.id=u.building_id WHERE e.id=?''', (elevator_id,)).fetchone()
+                actual = (target['building_name'], target['unit_name'], target['name'])
+                source = (data['building_name'], data['unit_name'], name)
+                place = ' / '.join(source)
+                if source != actual:
+                    place = f"表格：{place} → 实际：{' / '.join(actual)}"
+                preview.append({'row':number,'place':place,'action':action})
+                plan.append((number, action, actual, workbook_names[('buildings', target['building_id'])][1],
+                             workbook_names[('units', unit_id)][1], existing['id'] if existing else None))
             except HTTPException as exc:
                 errors.append(f'第{number}行：{exc.detail}')
-        if errors or dry_run:
-            db.rollback()
         if errors:
+            db.rollback()
             return {'valid':False, 'errors':errors[:20], 'error_count':len(errors), 'rows':[], 'added':0, 'skipped':0}
+        digest = hashlib.sha256(raw)
+        digest.update(json.dumps(plan).encode('utf-8'))
+        token = digest.hexdigest()
+        if dry_run:
+            db.rollback()
+        elif preview_token is not None and preview_token != token:
+            error('预览后的实际位置或导入结果已变化，请重新检查表格', 409)
+        else:
+            audit_import(db, user, '电梯档案', sum(row['action'] == '新增' for row in preview))
     return {'valid':True, 'errors':[], 'rows':preview, 'added':sum(r['action']=='新增' for r in preview),
-            'skipped':sum(r['action']=='跳过' for r in preview), 'committed':not dry_run}
+            'skipped':sum(r['action']=='跳过' for r in preview), 'committed':not dry_run,
+            'preview_token': token if dry_run else None}
 
 
 @app.get("/api/elevators")
@@ -491,11 +662,30 @@ def elevators(building_id: Optional[int] = None, unit_id: Optional[int] = None, 
         return items
 
 
+def normalize_numbered_elevator(data):
+    digits_only = any(key in data for key in ('building_number', 'unit_number', 'elevator_number'))
+    if digits_only:
+        for key, field, label, suffix in (
+            ('building_number', 'building_name', '楼栋', '栋'),
+            ('unit_number', 'unit_name', '单元口', '口'),
+        ):
+            number = require_text(data.get(key), label, 39)
+            if not re.fullmatch(r'[0-9]+', number) or not number.strip('0'):
+                error(f'{label}请输入大于 0 的整数')
+            data[field] = number.lstrip('0') + suffix
+        number = data.get('elevator_number')
+        if number not in ('1', '2'):
+            error('请选择 1 号或 2 号电梯')
+        data['name'] = number + '号电梯'
+    return digits_only
+
+
 @app.post("/api/elevators")
-def add_elevator(data: dict = Body(...), user=Depends(admin)):
+def add_elevator(data: dict = Body(...), user=Depends(actor)):
+    digits_only = normalize_numbered_elevator(data)
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
-        elevator_id = insert_elevator(db, data, user)
+        elevator_id = insert_elevator(db, data, user, digits_only=digits_only)
     return {"id": elevator_id}
 
 
@@ -508,34 +698,55 @@ def elevator(elevator_id: int, user=Depends(actor)):
         if not item:
             error("找不到这部电梯", 404)
         item["community"] = COMMUNITY
-        item["total_cost_cents"] = db.execute("SELECT COALESCE(SUM(cost_cents),0) FROM events WHERE elevator_id=? AND deleted_at IS NULL", (elevator_id,)).fetchone()[0]
+        item.update(db.execute("""SELECT COALESCE(SUM(cost_cents),0) AS total_cost_cents,
+            COALESCE(SUM(maintenance_fund_cents),0) AS total_maintenance_fund_cents
+            FROM events WHERE elevator_id=? AND deleted_at IS NULL""", (elevator_id,)).fetchone())
         return item
 
 
 @app.put("/api/elevators/{elevator_id}")
-def edit_elevator(elevator_id: int, data: dict = Body(...), user=Depends(admin)):
+def edit_elevator(elevator_id: int, data: dict = Body(...), user=Depends(actor)):
+    digits_only = normalize_numbered_elevator(data)
     values = elevator_values(data)
     values["name"] = require_text(data.get("name"), "电梯名称", 50)
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
-        before = must_exist(db, "elevators", elevator_id)
+        before = must_exist(db, 'elevators', elevator_id)
         if not before:
             error("找不到这部电梯", 404)
         if type(data.get("version")) is not int or data["version"] != before["version"]:
             error("电梯档案或状态已变化，请刷新页面后重新编辑", 409)
         values["version"] = before["version"] + 1
-        if 'building_name' in data or 'unit_name' in data:
-            values['unit_id'] = resolve_unit(db, data, user)
+        keep_unit = False
+        current_building_id = None
+        if digits_only:
+            location = get_one(db, """SELECT u.name unit_name,b.name building_name,b.id building_id,
+                CASE WHEN b.deleted_at IS NOT NULL THEN b.name WHEN u.deleted_at IS NOT NULL THEN u.name END deleted_name
+                FROM units u JOIN buildings b ON b.id=u.building_id WHERE u.id=?""", (before['unit_id'],))
+            if location and archive_number('buildings', location['building_name']) == archive_number('buildings', data['building_name']):
+                current_building_id = location['building_id']
+                keep_unit = archive_number('units', location['unit_name']) == archive_number('units', data['unit_name'])
+                if keep_unit and location['deleted_name'] is not None:
+                    error(f"{location['deleted_name']}已删除，请先在系统设置中恢复", 409)
+            if archive_number('elevators', before['name']) == data['elevator_number']:
+                values['name'] = before['name']
+        if not keep_unit and ('building_name' in data or 'unit_name' in data):
+            values['unit_id'] = resolve_unit(db, data, user, digits_only=digits_only, current_building_id=current_building_id)
+        unit_id = values.get('unit_id', before['unit_id'])
+        if unit_id != before['unit_id'] or values['name'] != before['name']:
+            existing = find_archive_name(db, 'elevators', values['name'], unit_id, digits_only=digits_only)
+            if existing is not None and existing['id'] != elevator_id:
+                error('该单元已有同号或同名电梯（含已删除资料，可在系统设置中恢复）', 409)
         try:
             db.execute(f"UPDATE elevators SET {','.join(f'{k}=?' for k in values)} WHERE id=?", (*values.values(), elevator_id))
         except sqlite3.IntegrityError:
-            error("该单元已有同名电梯（含已删除资料，可在系统管理中恢复）", 409)
+            error("该单元已有同名电梯（含已删除资料，可在系统设置中恢复）", 409)
         audit(db, user["id"], "修改", "电梯", elevator_id, before=before, after=values)
     return {"ok": True}
 
 
 @app.delete("/api/elevators/{elevator_id}")
-def delete_elevator(elevator_id: int, user=Depends(admin)):
+def delete_elevator(elevator_id: int, user=Depends(actor)):
     with connect() as db:
         before = must_exist(db, "elevators", elevator_id)
         if not before:
@@ -559,6 +770,19 @@ def event_values(data):
                   occurred_on=day(data.get("occurred_on"), "工作日期", True),
                   cost_cents=money(data.get("cost_yuan") if data.get("cost_yuan") not in (None, "") else 0), completed=flag(data.get("completed", True), "完成情况"),
                   stopped=flag(data.get("stopped", False), "是否停梯"), recovered=flag(data.get("recovered", False), "是否恢复正常"))
+    if "uses_maintenance_fund" in data or "maintenance_fund_yuan" in data:
+        uses_fund = flag(data.get("uses_maintenance_fund", False), "是否动用住宅维修资金")
+        amount = data.get("maintenance_fund_yuan")
+        values["uses_maintenance_fund"] = uses_fund
+        if uses_fund and amount not in (None, ""):
+            cents = money(amount)
+            if cents == 0:
+                error("请填写大于0的住宅维修基金金额")
+            values["maintenance_fund_cents"] = cents
+        else:
+            if amount not in (None, ""):
+                error("请先勾选动用住宅维修资金，再填写住宅维修基金金额")
+            values["maintenance_fund_cents"] = None
     for field in ("started_at", "ended_at", "fault_at", "reported_at", "arrived_at", "restored_at"):
         if values[field]:
             try:
@@ -593,6 +817,21 @@ def part_values(part, occurred_on):
                 notes=optional_text(part.get("notes"), 1000))
 
 
+def event_parts(data, values):
+    parts = data.get("parts") or []
+    if not isinstance(parts, list) or len(parts) > 30:
+        error("配件数量不正确")
+    if not parts and (values["type"] == "配件更换" or values.get("maintenance_fund_cents") is not None):
+        error("配件更换记录至少需要填写一个配件")
+    parsed = [part_values(part, values["occurred_on"]) for part in parts]
+    total = sum(part["quantity"] * part["unit_price_cents"] for part in parsed)
+    if total > 10_000_000_000:
+        error("本次配件合计不能超过一亿元")
+    if values["cost_auto"]:
+        values["cost_cents"] = total
+    return parsed
+
+
 def event_full(db, event_id):
     item = get_one(db, """SELECT v.*, e.name elevator_name,u.name unit_name,b.name building_name
         FROM events v JOIN elevators e ON e.id=v.elevator_id JOIN units u ON u.id=e.unit_id
@@ -601,6 +840,8 @@ def event_full(db, event_id):
     if item:
         for field in ("completed", "stopped", "recovered"):
             item[field] = bool(item[field])
+        item["uses_maintenance_fund"] = bool(item["uses_maintenance_fund"])
+        item["maintenance_fund_yuan"] = item["maintenance_fund_cents"] / 100 if item["maintenance_fund_cents"] is not None else None
         item["parts"] = rows(db.execute("SELECT * FROM event_parts WHERE event_id=? ORDER BY id", (event_id,)))
         for part in item["parts"]:
             part["total_price_cents"] = part["quantity"] * part["unit_price_cents"]
@@ -655,58 +896,44 @@ def update_record_status(db, data, elevator_id, user, event_id):
           after={"status": status, "event_id": event_id})
 
 
+def insert_event(db, data, user):
+    values = event_values(data)
+    parsed_parts = event_parts(data, values)
+    if not must_exist(db, "elevators", positive_int(data.get("elevator_id"), "电梯", 1)):
+        error("请选择已有电梯")
+    stamp = now()
+    payload = {"elevator_id": data["elevator_id"], **values, "created_by": user["id"], "created_at": stamp, "updated_at": stamp}
+    fields = list(payload)
+    cursor = db.execute(f"INSERT INTO events({','.join(fields)}) VALUES({','.join('?' for _ in fields)})", list(payload.values()))
+    for part in parsed_parts:
+        fields = list(part)
+        db.execute(f"INSERT INTO event_parts(event_id,{','.join(fields)}) VALUES(?,{','.join('?' for _ in fields)})",
+                   [cursor.lastrowid, *part.values()])
+    update_record_status(db, data, data["elevator_id"], user, cursor.lastrowid)
+    audit(db, user["id"], "新增", "工作记录", cursor.lastrowid, after={**payload, "parts": parsed_parts})
+    return {"id": cursor.lastrowid, "updated_at": payload["updated_at"]}
+
+
 @app.post("/api/events")
 def add_event(data: dict = Body(...), user=Depends(actor)):
-    values = event_values(data)
-    parts = data.get("parts") or []
-    if not isinstance(parts, list) or len(parts) > 30:
-        error("配件数量不正确")
-    if values["type"] == "配件更换" and not parts:
-        error("配件更换记录至少需要填写一个配件")
-    parsed_parts = [part_values(p, values["occurred_on"]) for p in parts]
-    if sum(part["quantity"] * part["unit_price_cents"] for part in parsed_parts) > 10_000_000_000:
-        error("本次配件合计不能超过一亿元")
-    if data.get("cost_yuan") is None or data.get("cost_yuan") == "":
-        values["cost_cents"] = sum(part["quantity"] * part["unit_price_cents"] for part in parsed_parts)
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        if not must_exist(db, "elevators", positive_int(data.get("elevator_id"), "电梯", 1)):
-            error("请选择已有电梯")
-        stamp = now()
-        payload = {"elevator_id": data["elevator_id"], **values, "created_by": user["id"], "created_at": stamp, "updated_at": stamp}
-        fields = list(payload)
-        cursor = db.execute(f"INSERT INTO events({','.join(fields)}) VALUES({','.join('?' for _ in fields)})", list(payload.values()))
-        for part in parsed_parts:
-            fields = list(part)
-            db.execute(f"INSERT INTO event_parts(event_id,{','.join(fields)}) VALUES(?,{','.join('?' for _ in fields)})",
-                       [cursor.lastrowid, *part.values()])
-        update_record_status(db, data, data["elevator_id"], user, cursor.lastrowid)
-        audit(db, user["id"], "新增", "工作记录", cursor.lastrowid, after={**payload, "parts": parsed_parts})
-    return {"id": cursor.lastrowid, "updated_at": payload["updated_at"]}
+        return insert_event(db, data, user)
 
 
 @app.put("/api/events/{event_id}")
 def edit_event(event_id: int, data: dict = Body(...), user=Depends(actor)):
     values = event_values(data)
-    parts = data.get("parts") or []
-    if not isinstance(parts, list) or len(parts) > 30:
-        error("配件数量不正确")
-    if values["type"] == "配件更换" and not parts:
-        error("配件更换记录至少需要填写一个配件")
-    parsed_parts = [part_values(p, values["occurred_on"]) for p in parts]
-    if sum(part["quantity"] * part["unit_price_cents"] for part in parsed_parts) > 10_000_000_000:
-        error("本次配件合计不能超过一亿元")
-    if data.get("cost_yuan") is None or data.get("cost_yuan") == "":
-        values["cost_cents"] = sum(part["quantity"] * part["unit_price_cents"] for part in parsed_parts)
+    parsed_parts = event_parts(data, values)
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         before = event_full(db, event_id)
         if not before:
             error("找不到这条工作记录", 404)
-        if user["role"] != "admin" and before["created_by"] != user["id"]:
-            error("只能修改自己创建的记录", 403)
         if data.get("updated_at") and data["updated_at"] != before["updated_at"]:
             error("这条记录刚被其他人修改，请重新打开后再编辑", 409)
+        if not parsed_parts and values.get("maintenance_fund_cents", before["maintenance_fund_cents"]) is not None:
+            error("清空配件前请取消动用住宅维修资金")
         values["updated_at"] = now()
         db.execute(f"UPDATE events SET {','.join(f'{k}=?' for k in values)} WHERE id=?", (*values.values(), event_id))
         db.execute("DELETE FROM event_parts WHERE event_id=?", (event_id,))
@@ -720,7 +947,7 @@ def edit_event(event_id: int, data: dict = Body(...), user=Depends(actor)):
 
 
 @app.delete("/api/events/{event_id}")
-def delete_event(event_id: int, user=Depends(admin)):
+def delete_event(event_id: int, user=Depends(actor)):
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
         before = event_full(db, event_id)
@@ -784,6 +1011,53 @@ def checked_upload_target(relative):
     return target
 
 
+def photo_library_records(db, elevator_id, event_id=None, limit=None, offset=0):
+    args = []
+    sql = """SELECT v.id,v.elevator_id,v.title,v.type,v.occurred_on
+        FROM events v JOIN elevators e ON e.id=v.elevator_id JOIN units u ON u.id=e.unit_id
+        JOIN buildings b ON b.id=u.building_id WHERE v.deleted_at IS NULL AND e.deleted_at IS NULL
+        AND u.deleted_at IS NULL AND b.deleted_at IS NULL AND EXISTS (
+          SELECT 1 FROM attachments a WHERE a.event_id=v.id AND a.elevator_id=v.elevator_id
+          AND a.deleted_at IS NULL AND a.relative_path LIKE 'photos/%')"""
+    for clause, value in (("v.elevator_id=?", elevator_id), ("v.id=?", event_id)):
+        if value is not None:
+            sql += " AND " + clause
+            args.append(value)
+    sql += " ORDER BY v.occurred_on DESC,v.id DESC"
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        args.extend((limit, offset))
+    return rows(db.execute(sql, args))
+
+
+@app.get('/api/photo-library/records')
+def list_photo_records(elevator_id: Optional[int] = None, user=Depends(actor)):
+    with connect() as db:
+        return photo_library_records(db, elevator_id)
+
+
+@app.get('/api/photo-library')
+def photo_library(elevator_id: Optional[int] = None, event_id: Optional[int] = None, offset: int = 0, user=Depends(actor)):
+    limit = 20
+    with connect() as db:
+        db.execute('BEGIN')
+        records = photo_library_records(db, elevator_id, event_id, limit + 1, max(0, min(offset, 1_000_000)))
+        page = records[:limit]
+        if page:
+            _, labels = active_elevator_labels(db)
+            add_elevator_labels(page, labels)
+            ids = {record['id']: record for record in page}
+            for record in page:
+                record['photos'] = []
+            placeholders = ','.join('?' for _ in ids)
+            for photo in rows(db.execute(f"""SELECT a.id,a.event_id,a.original_name,a.category
+                FROM attachments a JOIN events v ON v.id=a.event_id AND v.elevator_id=a.elevator_id
+                WHERE a.event_id IN ({placeholders}) AND a.deleted_at IS NULL AND a.relative_path LIKE 'photos/%'
+                ORDER BY a.sort_order,a.created_at,a.id""", tuple(ids))):
+                ids[photo['event_id']]['photos'].append(photo)
+    return {'records': page, 'has_more': len(records) > limit}
+
+
 @app.post("/api/events/{event_id}/attachments")
 async def upload(event_id: int, file: UploadFile = File(...), category: str = Form("其他"), user=Depends(actor)):
     if category not in CATEGORIES:
@@ -807,8 +1081,6 @@ async def upload(event_id: int, file: UploadFile = File(...), category: str = Fo
         event = event_full(db, event_id)
         if not event:
             error("找不到这条工作记录", 404)
-        if user["role"] != "admin" and event["created_by"] != user["id"]:
-            error("只能为自己创建的记录上传附件", 403)
         target = checked_upload_target(relative)
         # Exclusive creation also prevents following an existing file symlink.
         with target.open("xb") as output:
@@ -836,8 +1108,6 @@ def order_attachments(event_id: int, data: dict = Body(...), user=Depends(actor)
         event = event_full(db, event_id)
         if not event:
             error("找不到这条工作记录", 404)
-        if user["role"] != "admin" and event["created_by"] != user["id"]:
-            error("只能调整自己创建记录的附件顺序", 403)
         before = [item["id"] for item in event["attachments"]]
         if set(ids) != set(before):
             error("附件已变化，请刷新记录后重新调整", 409)
@@ -871,8 +1141,6 @@ def delete_attachment(file_id: str, user=Depends(actor)):
             AND v.deleted_at IS NULL AND e.deleted_at IS NULL""", (file_id,))
         if not item:
             error("找不到附件", 404)
-        if user["role"] != "admin" and item["uploaded_by"] != user["id"]:
-            error("只能删除自己上传的附件", 403)
         db.execute("UPDATE attachments SET deleted_at=? WHERE id=?", (now(), file_id))
         audit(db, user["id"], "删除", "附件", file_id, before=item)
     return {"ok": True}
@@ -880,32 +1148,63 @@ def delete_attachment(file_id: str, user=Depends(actor)):
 
 @app.get("/api/search")
 def search(q: str = "", user=Depends(actor)):
-    if len(q) > 200 or len(q.split()) > 10:
+    q = q.strip()
+    archive_id = len(q) <= 400 and re.match(r'档案\s*([0-9]{1,19})(?=$|\s|·)(\s*·\s*)?', q)
+    copied_label = len(q) <= 400 and re.search(r'（档案 [0-9]{1,19} · .+）\Z', q, re.DOTALL)
+    terms = q.split()
+    if not (archive_id or copied_label) and (len(q) > 200 or len(terms) > 10):
         error("搜索内容请控制在200字、10个关键词以内")
-    terms = q.strip().split()
-    if not terms:
+    if not q:
         return {"elevators": [], "events": [], "truncated": False}
-    base = """FROM elevators e JOIN units u ON u.id=e.unit_id JOIN buildings b ON b.id=u.building_id
+    base = """FROM search_locations s JOIN elevators e ON e.id=s.elevator_id
+        JOIN units u ON u.id=e.unit_id JOIN buildings b ON b.id=u.building_id
         LEFT JOIN events v ON v.elevator_id=e.id AND v.deleted_at IS NULL
         WHERE e.deleted_at IS NULL AND u.deleted_at IS NULL AND b.deleted_at IS NULL"""
-    fields = ("b.name", "u.name", "e.name", "e.internal_number", "e.equipment_number", "e.maintenance_company",
-              "v.title", "v.work_content", "v.symptom", "v.resolution", "v.occurred_on", "v.company",
-              "v.cause", "v.remedy", "v.notes", "v.workers")
+    record_fields = ("v.title", "v.work_content", "v.symptom", "v.resolution", "v.occurred_on", "v.company",
+                     "v.cause", "v.remedy", "v.notes", "v.workers")
+    fields = ("b.name", "u.name", "e.name", "s.label", "e.internal_number", "e.equipment_number", "e.maintenance_company") + record_fields
     args = []
-    for term in terms:
-        like = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-        base += " AND (" + " OR ".join(field + " LIKE ? ESCAPE '\\'" for field in fields)
-        base += " OR EXISTS (SELECT 1 FROM event_parts p WHERE p.event_id=v.id AND p.name LIKE ? ESCAPE '\\'))"
-        args.extend([like] * (len(fields) + 1))
     with connect() as db:
+        db.execute('BEGIN')
+        canonical, labels = active_elevator_labels(db)
+        if archive_id:
+            base += ' AND e.id=?'
+            args.append(archive_id[1])
+            remainder = q[archive_id.end():].strip()
+            if archive_id[2]:
+                document_place = canonical.get(int(archive_id[1]))
+                current_place = re.match(re.escape(document_place) + r'(?=$|\s)', remainder) if document_place else None
+                if current_place:
+                    remainder = remainder[current_place.end():]
+                else:
+                    # shortcut: renamed locations containing spaces need the bare archive ID until export labels delimit them.
+                    old_place_and_terms = remainder.split(maxsplit=1)
+                    remainder = old_place_and_terms[1] if len(old_place_and_terms) == 2 else ''
+                fields = record_fields
+            terms = remainder.split()
+        elif copied_label:
+            base += ' AND s.label=?'
+            args.append(q)
+            terms = []
+        if len(terms) > 10:
+            error("搜索内容请控制在200字、10个关键词以内")
+        for term in terms:
+            like = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            base += " AND (" + " OR ".join(field + " LIKE ? ESCAPE '\\'" for field in fields)
+            base += " OR EXISTS (SELECT 1 FROM event_parts p WHERE p.event_id=v.id AND p.name LIKE ? ESCAPE '\\'))"
+            args.extend([like] * (len(fields) + 1))
+        # The two result queries share one label per elevator from this read snapshot.
+        db.execute('CREATE TEMP TABLE search_locations(elevator_id INTEGER PRIMARY KEY, label TEXT NOT NULL)')
+        db.executemany('INSERT INTO search_locations VALUES(?,?)', labels.items())
         elevators_found = rows(db.execute("SELECT DISTINCT e.id,e.name,e.status,b.name building_name,u.name unit_name " + base + " ORDER BY b.name,u.name,e.name LIMIT 101", args))
         ids = [row[0] for row in db.execute("SELECT DISTINCT v.id " + base + " AND v.id IS NOT NULL ORDER BY v.occurred_on DESC,v.id DESC LIMIT 101", args)]
-        return {"elevators": elevators_found[:100], "events": [event_full(db, x) for x in ids[:100]],
+        return {"elevators": add_elevator_labels(elevators_found[:100], labels),
+                "events": add_elevator_labels([event_full(db, x) for x in ids[:100]], labels),
                 "truncated": len(elevators_found) > 100 or len(ids) > 100}
 
 
 def reminders_data(db):
-    today = date.today()
+    today = datetime.now(SHANGHAI).date()
     result = []
     for item in rows(db.execute("""SELECT p.id part_id,p.name,p.warranty_until,e.id elevator_id,e.name elevator_name,u.name unit_name,b.name building_name
         FROM event_parts p JOIN events v ON v.id=p.event_id JOIN elevators e ON e.id=v.elevator_id
@@ -930,22 +1229,30 @@ def reminders_data(db):
 @app.get("/api/reminders")
 def reminders(user=Depends(actor)):
     with connect() as db:
-        return reminders_data(db)
+        db.execute('BEGIN')
+        items = reminders_data(db)
+        if items:
+            _, labels = active_elevator_labels(db)
+            add_elevator_labels(items, labels)
+        return items
 
 
 @app.get("/api/dashboard")
 def dashboard(user=Depends(actor)):
     with connect() as db:
+        db.execute('BEGIN')
         stats = dict(db.execute("""SELECT COUNT(*) total, SUM(status='正常') normal,
           SUM(status='故障') fault, SUM(status='维修中') repairing FROM elevators WHERE deleted_at IS NULL""").fetchone())
-        month = date.today().strftime("%Y-%m")
+        month = datetime.now(SHANGHAI).date().strftime("%Y-%m")
         stats["monthly_repairs"] = db.execute("SELECT COUNT(*) FROM events v JOIN elevators e ON e.id=v.elevator_id WHERE v.type='维修' AND v.occurred_on LIKE ? AND v.deleted_at IS NULL AND e.deleted_at IS NULL", (month + "%",)).fetchone()[0]
         stats["monthly_parts"] = db.execute("""SELECT COALESCE(SUM(p.quantity),0) FROM event_parts p JOIN events v ON v.id=p.event_id JOIN elevators e ON e.id=v.elevator_id
           WHERE v.occurred_on LIKE ? AND v.deleted_at IS NULL AND e.deleted_at IS NULL""", (month + "%",)).fetchone()[0]
         recent = rows(db.execute("""SELECT v.id,v.elevator_id,v.type,v.title,v.occurred_on,v.completed,e.name elevator_name,u.name unit_name,b.name building_name
            FROM events v JOIN elevators e ON e.id=v.elevator_id JOIN units u ON u.id=e.unit_id JOIN buildings b ON b.id=u.building_id
            WHERE v.deleted_at IS NULL AND e.deleted_at IS NULL ORDER BY v.occurred_on DESC,v.id DESC LIMIT 15"""))
-        return {"stats": stats, "reminders": reminders_data(db), "recent": recent}
+        upcoming = reminders_data(db)
+        _, labels = active_elevator_labels(db) if recent or upcoming else ({}, {})
+        return {"stats": stats, "reminders": add_elevator_labels(upcoming, labels), "recent": add_elevator_labels(recent, labels), "seed_status": seed_status_data(db)}
 
 
 @app.get("/api/costs")
@@ -956,7 +1263,8 @@ def costs(building_id: Optional[int] = None, unit_id: Optional[int] = None, elev
     start = day(start); end = day(end)
     if start and end and start > end:
         error("开始日期不能晚于结束日期")
-    sql = """SELECT COALESCE(SUM(v.cost_cents),0) cost_cents,COUNT(*) record_count FROM events v
+    sql = """SELECT COALESCE(SUM(v.cost_cents),0) cost_cents,
+      COALESCE(SUM(v.maintenance_fund_cents),0) maintenance_fund_cents,COUNT(*) record_count FROM events v
       JOIN elevators e ON e.id=v.elevator_id JOIN units u ON u.id=e.unit_id WHERE v.deleted_at IS NULL AND e.deleted_at IS NULL"""
     args = []
     for clause, value in (("v.type=?", type if type != "全部" else None), ("u.building_id=?", building_id), ("u.id=?", unit_id), ("v.elevator_id=?", elevator_id),
@@ -991,7 +1299,7 @@ def get_network(request: Request, user=Depends(actor)):
 
 
 @app.put("/api/network")
-def set_network(request: Request, data: dict = Body(...), user=Depends(admin)):
+def set_network(request: Request, data: dict = Body(...), user=Depends(actor)):
     try:
         base = validate_base(data.get('base_url'))
     except ValueError as exc:
@@ -1020,7 +1328,7 @@ def qr_info(elevator_id: int, request: Request, user=Depends(actor)):
 def qr(elevator_id: int, request: Request, user=Depends(actor)):
     info = elevator_qr_info(elevator_id, request)
     if not info['url']:
-        error('尚未确定局域网地址，请管理员在系统管理中设置后再下载二维码', 409)
+        error('尚未确定局域网地址，请在系统设置中保存访问地址后再下载二维码', 409)
     image = qrcode.make(info['url'])
     output = io.BytesIO(); image.save(output, format="PNG")
     return Response(output.getvalue(), media_type="image/png", headers={"Cache-Control": "no-store"})
@@ -1031,7 +1339,7 @@ TRASH = {"buildings": ("楼栋", "name"), "units": ("单元", "name"), "elevator
 
 
 @app.get("/api/trash")
-def trash_list(user=Depends(admin)):
+def trash_list(user=Depends(actor)):
     items = []
     with connect() as db:
         for table, (label, name) in TRASH.items():
@@ -1041,7 +1349,7 @@ def trash_list(user=Depends(admin)):
 
 
 @app.post("/api/trash/{kind}/{record_id}/restore")
-def restore(kind: str, record_id: str, user=Depends(admin)):
+def restore(kind: str, record_id: str, user=Depends(actor)):
     if kind not in TRASH:
         error("资料类型不正确")
     with connect() as db:
@@ -1064,15 +1372,30 @@ def restore(kind: str, record_id: str, user=Depends(admin)):
     return {"ok": True}
 
 
+@app.get("/api/timeline")
+def operation_timeline(start: Optional[date] = None, end: Optional[date] = None, month: Optional[date] = None,
+                       elevator_id: Optional[int] = None, type: str = "", user=Depends(actor)):
+    end = end or datetime.now(SHANGHAI).date()
+    start = start or date.fromordinal(max(1, end.toordinal() - 6))
+    month = month or end
+    if end < start:
+        error("结束日期应在开始日期之后或为同一天")
+    first = month.replace(day=1)
+    last = month.replace(day=calendar.monthrange(month.year, month.month)[1])
+    with connect() as db:
+        db.execute("BEGIN")
+        return timeline(db, start, end, first, last, elevator_id, type)
+
+
 @app.get("/api/audit")
-def audit_list(user=Depends(admin)):
+def audit_list(user=Depends(actor)):
     with connect() as db:
         return rows(db.execute("""SELECT a.id,a.action,a.target,a.target_id,a.created_at,u.display_name
           FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT 200"""))
 
 
 @app.post("/api/backup")
-def backup(user=Depends(admin)):
+def backup(user=Depends(actor)):
     try:
         path = create_backup()
     except ValueError as exc:
@@ -1083,7 +1406,7 @@ def backup(user=Depends(admin)):
 
 
 @app.get("/api/backups/{filename}")
-def get_backup(filename: str, user=Depends(admin)):
+def get_backup(filename: str, user=Depends(actor)):
     if not filename.startswith("backup_") or Path(filename).name != filename or not filename.endswith(".zip"):
         error("备份文件名无效")
     path = BACKUPS / filename
@@ -1109,27 +1432,26 @@ def prepare_export(scope, building_id, unit_id, elevator_id, start, end, type, p
         error(str(exc))
     except Exception:
         logging.exception("Word生成失败")
-        error("生成档案失败，请联系管理员查看日志", 500)
+        error("生成档案失败，请查看系统日志", 500)
     with connect() as db:
         audit(db, user["id"], "导出", "工作档案", download_name)
     return path, download_name
 
 
-def export_draft_row(db, draft_id, user):
+def export_draft_row(db, draft_id):
     item = get_one(db, '''SELECT d.*,u.display_name created_by_name FROM export_drafts d
         JOIN users u ON u.id=d.created_by WHERE d.id=?''', (draft_id,))
     if not item:
         error('找不到这份工作文稿', 404)
-    if user['role'] != 'admin' and item['created_by'] != user['id']:
-        error('只能查看和修改自己创建的文稿', 403)
     return item
 
 
-def draft_blocks(value, source):
+def draft_blocks(value, source, uploads=()):
     if not isinstance(value, list) or len(value) > 5000:
         error('文稿最多包含5000个内容块，请缩小来源范围')
     pictures = {attachment['id'] for _, _, attachment in source_attachments(source)
                 if attachment['relative_path'].startswith('photos/')}
+    pictures.update(uploads)
     blocks, ids, used_pictures = [], set(), set()
     for block in value:
         if not isinstance(block, dict):
@@ -1144,7 +1466,7 @@ def draft_blocks(value, source):
         elif kind == 'image':
             attachment_id = block.get('attachment_id')
             if not isinstance(attachment_id, str) or attachment_id not in pictures:
-                error('只能插入这份文稿来源记录中的照片')
+                error('只能插入这份文稿的来源照片或本稿上传的照片')
             if attachment_id in used_pictures:
                 error('同一张照片不能重复插入正文')
             used_pictures.add(attachment_id)
@@ -1187,7 +1509,7 @@ def create_export_draft(data: dict = Body(...), user=Depends(actor)):
             json.dumps(source, ensure_ascii=False), json.dumps(blocks, ensure_ascii=False), stamp, stamp))
         draft_id = cursor.lastrowid
         audit(db, user['id'], '新增', '工作文稿', draft_id, after={'title': title, 'filters': filters, 'revision': 1})
-        item = export_draft_row(db, draft_id, user)
+        item = export_draft_row(db, draft_id)
     return draft_detail(item)
 
 
@@ -1196,42 +1518,125 @@ def list_export_drafts(user=Depends(actor)):
     with connect() as db:
         sql = '''SELECT d.id,d.created_by,u.display_name created_by_name,d.title,d.revision,d.created_at,d.updated_at
                  FROM export_drafts d JOIN users u ON u.id=d.created_by'''
-        args = ()
-        if user['role'] != 'admin':
-            sql += ' WHERE d.created_by=?'; args = (user['id'],)
-        return rows(db.execute(sql + ' ORDER BY d.updated_at DESC,d.id DESC', args))
+        return rows(db.execute(sql + ' ORDER BY d.updated_at DESC,d.id DESC'))
 
 
 @app.get('/api/export-drafts/{draft_id}')
 def get_export_draft(draft_id: int, user=Depends(actor)):
     with connect() as db:
-        item = export_draft_row(db, draft_id, user)
-    return draft_detail(item)
+        db.execute('BEGIN')
+        item = export_draft_row(db, draft_id)
+        uploads = draft_photos(db, draft_id)
+    return draft_detail(item, uploads)
 
 
 @app.put('/api/export-drafts/{draft_id}')
 def save_export_draft(draft_id: int, data: dict = Body(...), user=Depends(actor)):
+    return persist_export_draft(draft_id, data, user)
+
+
+@app.post('/api/export-drafts/{draft_id}/save-with-photos')
+def save_export_draft_with_photos(draft_id: int, payload: UploadFile = File(...), photos: list[UploadFile] = File(...), user=Depends(actor)):
+    # Each block may contain 10,000 characters, each JSON-escaped into at most six bytes.
+    if payload.size is not None and payload.size > 302_000_000:
+        error('文稿内容过大，请缩小来源范围')
+    try:
+        data = json.load(payload.file)
+    except (TypeError, ValueError, RecursionError):
+        error('文稿内容格式不正确')
+    if not isinstance(data, dict):
+        error('文稿内容格式不正确')
+    ids = data.get('photo_ids')
+    if not isinstance(ids, list) or len(ids) != len(photos) or len(ids) > 50 or any(
+            not isinstance(photo_id, str) or not re.fullmatch(r'upload-[A-Za-z0-9_-]{1,57}', photo_id) for photo_id in ids
+    ) or len(set(ids)) != len(ids):
+        error('每次最多添加50张照片，且照片编号不能重复')
+    return persist_export_draft(draft_id, data, user, dict(zip(ids, photos)))
+
+
+def save_draft_photos(db, draft_id, user, photos, written):
+    total = 0
+    for photo_id, file in photos.items():
+        original = (file.filename or '').replace('\\', '/').split('/')[-1].strip()
+        if not original or len(original) > 200 or any(ord(char) < 32 for char in original):
+            error('文件名无效')
+        ext = Path(original).suffix.lower()
+        if ext not in PHOTO_FORMATS:
+            error('文稿照片仅支持 JPG、PNG、WebP 格式')
+        raw = file.file.read(MAX_UPLOAD + 1)
+        if not raw or len(raw) > MAX_UPLOAD:
+            error('每张照片不能为空，且不能超过20 MB')
+        total += len(raw)
+        if total > MAX_DRAFT_UPLOAD:
+            error('每次保存的新增照片合计不能超过100 MB，请分次添加')
+        validate_file(raw, ext)
+        try:
+            with Image.open(io.BytesIO(raw), formats=[PHOTO_FORMATS[ext]]) as image:
+                image.load()
+        except (OSError, ValueError, SyntaxError):
+            error(f'照片无法读取或格式与文件名不符：{original}')
+        relative = Path(DRAFT_PHOTO_FOLDER) / f'{uuid.uuid4().hex}{ext}'
+        target = checked_upload_target(relative)
+        if target != STORAGE.resolve() / relative:
+            error('文稿照片存储路径无效，请联系管理员')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open('xb') as output:
+            written.append(target)
+            output.write(raw)
+            output.flush()
+            os.fsync(output.fileno())
+        db.execute('''INSERT INTO draft_photos(draft_id,id,original_name,relative_path,mime_type,size,uploaded_by,created_at)
+            VALUES(?,?,?,?,?,?,?,?)''', (draft_id, photo_id, original, relative.as_posix(),
+                                        Image.MIME[PHOTO_FORMATS[ext]], len(raw), user['id'], now()))
+
+
+def persist_export_draft(draft_id, data, user, photos=None):
+    photos = photos or {}
     title = require_text(data.get('title'), '文稿标题', 200)
     revision = positive_int(data.get('revision'), '文稿版本', 1)
-    with connect() as db:
-        db.execute('BEGIN IMMEDIATE')
-        before = export_draft_row(db, draft_id, user)
-        blocks = draft_blocks(data.get('blocks'), json.loads(before['source_json']))
-        cursor = db.execute('''UPDATE export_drafts SET title=?,blocks_json=?,revision=revision+1,updated_at=?,
-            docx_name=NULL,zip_name=NULL WHERE id=? AND revision=?''',
-            (title, json.dumps(blocks, ensure_ascii=False), now(), draft_id, revision))
-        if cursor.rowcount != 1:
-            error('这份文稿刚被其他人修改，当前编辑内容已保留；请先重新打开最新版本', 409)
-        audit(db, user['id'], '修改', '工作文稿', draft_id,
-              before={'title': before['title'], 'revision': before['revision']}, after={'title': title, 'revision': revision + 1})
-        item = export_draft_row(db, draft_id, user)
-    return draft_detail(item)
+    written = []
+    try:
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            before = export_draft_row(db, draft_id)
+            if revision != before['revision']:
+                error('这份文稿刚被其他人修改，当前编辑内容已保留；请先重新打开最新版本', 409)
+            owned = {photo['id'] for photo in draft_photos(db, draft_id)}
+            if owned.intersection(photos):
+                error('文稿已存在同名照片编号，请重新添加')
+            blocks = draft_blocks(data.get('blocks'), json.loads(before['source_json']), owned.union(photos))
+            if set(photos).difference(block['attachment_id'] for block in blocks if block['type'] == 'image'):
+                error('新增照片必须放在文稿中')
+            save_draft_photos(db, draft_id, user, photos, written)
+            db.execute('''UPDATE export_drafts SET title=?,blocks_json=?,revision=revision+1,updated_at=?,
+                docx_name=NULL,zip_name=NULL WHERE id=?''', (title, json.dumps(blocks, ensure_ascii=False), now(), draft_id))
+            audit(db, user['id'], '修改', '工作文稿', draft_id,
+                  before={'title': before['title'], 'revision': before['revision']},
+                  after={'title': title, 'revision': revision + 1, 'photos_added': len(photos)})
+            item = export_draft_row(db, draft_id)
+            uploads = draft_photos(db, draft_id)
+    except Exception:
+        for target in written:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                logging.exception('本次未保存的文稿照片清理失败')
+        raise
+    return draft_detail(item, uploads)
 
 
 @app.get('/api/export-drafts/{draft_id}/images/{attachment_id}')
-def export_draft_image(draft_id: int, attachment_id: str, user=Depends(actor)):
+def export_draft_image(draft_id: int, attachment_id: str, download: bool = False, user=Depends(actor)):
     with connect() as db:
-        item = export_draft_row(db, draft_id, user)
+        item = export_draft_row(db, draft_id)
+        photo = get_one(db, 'SELECT * FROM draft_photos WHERE draft_id=? AND id=?', (draft_id, attachment_id))
+    if photo:
+        target = draft_photo_path(photo)
+        if target is None:
+            error('文稿原图缺失或文件无效', 404)
+        return FileResponse(target, media_type=photo['mime_type'], filename=photo['original_name'],
+                            content_disposition_type='attachment' if download else 'inline',
+                            headers={'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store'})
     source = json.loads(item['source_json'])
     selected = next(((e, v, a) for e, v, a in source_attachments(source) if a['id'] == attachment_id
                      and a['relative_path'].startswith('photos/')), None)
@@ -1251,16 +1656,18 @@ def prepare_export_draft(draft_id: int, data: dict = Body(...), user=Depends(act
     package = bool(flag(data.get('package', False), '完整档案包'))
     directory = bool(flag(data.get('directory', True), '附件目录'))
     with connect() as db:
-        item = export_draft_row(db, draft_id, user)
+        db.execute('BEGIN')
+        item = export_draft_row(db, draft_id)
+        uploads = draft_photos(db, draft_id)
     if revision != item['revision']:
         error('文稿版本已变化，请先保存或重新打开最新版本', 409)
     try:
-        docx_path, zip_path, filename = make_draft_export(item, package, directory)
+        docx_path, zip_path, filename = make_draft_export(item, package, directory, uploads)
     except ValueError as exc:
         error(str(exc))
     except Exception:
         logging.exception('工作文稿生成失败')
-        error('生成文稿失败，请联系管理员查看日志', 500)
+        error('生成文稿失败，请查看系统日志', 500)
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
         cursor = db.execute('''UPDATE export_drafts SET docx_name=?,zip_name=? WHERE id=? AND revision=?''',
@@ -1278,7 +1685,7 @@ def prepare_export_draft(draft_id: int, data: dict = Body(...), user=Depends(act
 @app.get('/api/export-drafts/{draft_id}/download/{stored_name}')
 def download_export_draft(draft_id: int, stored_name: str, user=Depends(actor)):
     with connect() as db:
-        item = export_draft_row(db, draft_id, user)
+        item = export_draft_row(db, draft_id)
     if Path(stored_name).name != stored_name or stored_name not in (item['docx_name'], item['zip_name']):
         error('找不到这份文稿导出文件，请重新生成', 404)
     path = EXPORTS / stored_name

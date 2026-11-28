@@ -1,10 +1,8 @@
-import hashlib
 import json
 import os
-import secrets
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,8 +18,11 @@ for directory in (DATA, STORAGE, EXPORTS, BACKUPS, LOGS):
     directory.mkdir(parents=True, exist_ok=True)
 
 
+SHANGHAI = timezone(timedelta(hours=8))
+
+
 def now():
-    return datetime.now().astimezone().isoformat(timespec="microseconds")
+    return datetime.now(SHANGHAI).isoformat(timespec="microseconds")
 
 
 @contextmanager
@@ -42,20 +43,6 @@ def connect():
 
 def rows(cursor):
     return [dict(row) for row in cursor.fetchall()]
-
-
-def password_hash(password, salt=None):
-    salt = salt or secrets.token_hex(16)
-    value = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 310_000)
-    return f"{salt}${value.hex()}"
-
-
-def verify_password(password, encoded):
-    try:
-        salt, expected = encoded.split("$", 1)
-        return secrets.compare_digest(password_hash(password, salt), encoded)
-    except (ValueError, AttributeError):
-        return False
 
 
 def audit(db, user_id, action, target, target_id, before=None, after=None):
@@ -105,20 +92,41 @@ def init_db():
           original_name TEXT NOT NULL, relative_path TEXT NOT NULL, category TEXT NOT NULL,
           mime_type TEXT NOT NULL, size INTEGER NOT NULL, uploaded_by INTEGER NOT NULL REFERENCES users(id),
           created_at TEXT NOT NULL, deleted_at TEXT);
+        CREATE INDEX IF NOT EXISTS idx_active_attachments_event ON attachments(event_id) WHERE deleted_at IS NULL;
         CREATE TABLE IF NOT EXISTS audit_logs (
           id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), action TEXT NOT NULL, target TEXT NOT NULL,
           target_id TEXT, before_json TEXT, after_json TEXT, created_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_logs(target,target_id,action);
+        CREATE INDEX IF NOT EXISTS idx_event_created ON events(created_at);
         CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS export_drafts (
           id INTEGER PRIMARY KEY, created_by INTEGER NOT NULL REFERENCES users(id), title TEXT NOT NULL,
           filters_json TEXT NOT NULL, source_json TEXT NOT NULL, blocks_json TEXT NOT NULL,
           revision INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
           docx_name TEXT, zip_name TEXT);
+        CREATE TABLE IF NOT EXISTS draft_photos (
+          draft_id INTEGER NOT NULL REFERENCES export_drafts(id), id TEXT NOT NULL,
+          original_name TEXT NOT NULL, relative_path TEXT NOT NULL UNIQUE, mime_type TEXT NOT NULL,
+          size INTEGER NOT NULL, uploaded_by INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL,
+          PRIMARY KEY(draft_id,id));
         """)
         # Old records have no reliable indication of manual versus calculated cost.
         # Preserve their recorded totals; new records retain the user's choice.
+        db.execute('BEGIN IMMEDIATE')
+        # Blank usernames were never valid accounts. This inactive row provides
+        # foreign keys for new work without changing historical attribution.
+        db.execute("""INSERT OR IGNORE INTO users(username,display_name,password_hash,role,active,created_at)
+                      VALUES('','本地操作员','','staff',0,?)""", (now(),))
         if 'cost_auto' not in {row['name'] for row in db.execute('PRAGMA table_info(events)')}:
             db.execute('ALTER TABLE events ADD COLUMN cost_auto INTEGER NOT NULL DEFAULT 0')
+        if 'maintenance_fund_cents' not in {row['name'] for row in db.execute('PRAGMA table_info(events)')}:
+            db.execute('''ALTER TABLE events ADD COLUMN maintenance_fund_cents INTEGER
+                CHECK(maintenance_fund_cents BETWEEN 1 AND 10000000000)''')
+        if 'uses_maintenance_fund' not in {row['name'] for row in db.execute('PRAGMA table_info(events)')}:
+            db.execute("""ALTER TABLE events ADD COLUMN uses_maintenance_fund INTEGER NOT NULL
+                DEFAULT 0 CHECK(uses_maintenance_fund IN (0,1))""")
+            db.execute('UPDATE events SET uses_maintenance_fund=1 WHERE maintenance_fund_cents IS NOT NULL')
         if 'sort_order' not in {row['name'] for row in db.execute('PRAGMA table_info(attachments)')}:
             db.execute('ALTER TABLE attachments ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0')
         if 'version' not in {row['name'] for row in db.execute('PRAGMA table_info(elevators)')}:
