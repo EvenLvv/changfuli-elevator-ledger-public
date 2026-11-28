@@ -17,7 +17,7 @@ SetDatablockOptimize on
   !error "Pass -DOUT_FILE=<installer.exe>"
 !endif
 !ifndef APP_VERSION
-  !define APP_VERSION "2.0.1"
+  !define APP_VERSION "2.0.2"
 !endif
 !ifndef PAYLOAD_KB
   !define PAYLOAD_KB 0
@@ -52,7 +52,7 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "昌福里社区27区党群物业服
 !define MUI_CUSTOMFUNCTION_UNABORT un.InstallerAbort
 !define MUI_WELCOMEPAGE_TEXT "本向导将在本机安装“昌福里社区电梯管理系统 2.0”（独立 2.0 桌面版，不覆盖 1.x 旧版程序、快捷方式或数据）。$\r$\n$\r$\n下一步可自行选择程序安装目录。台账数据库、现场照片、导出文稿、备份及 WebView2 缓存统一保存在当前登录用户的本地数据目录（%LOCALAPPDATA%\${APP_ID}），与程序目录分离，升级和卸载均保留业务资料。$\r$\n$\r$\n安装需要管理员授权，日常使用无需管理员权限。"
 !define MUI_DIRECTORYPAGE_TEXT_TOP "请选择“昌福里社区电梯管理系统 2.0”的程序安装文件夹。程序文件仅写入下方所选目录；台账数据库与附件资料会在用户启动应用时保存在 %LOCALAPPDATA%\${APP_ID}，不会写入程序目录。"
-!define MUI_FINISHPAGE_TEXT "“昌福里社区电梯管理系统 2.0”已安装完成。$\r$\n$\r$\n请以日常使用的普通用户身份双击桌面“昌福里社区电梯管理系统 2.0”，打开桌面窗口后即可直接进入免登录工作台。若本机存有 1.x 旧版台账或随包建账表格，首次启动会在当前用户数据目录安全准备台账，且不改动旧版目录。$\r$\n$\r$\n关闭主机桌面窗口会停止服务（端口 8766）；局域网访问期间请保持窗口打开。打开数据目录、停止系统与卸载入口位于开始菜单“昌福里社区电梯管理系统 2.0”。"
+!define MUI_FINISHPAGE_TEXT "“昌福里社区电梯管理系统 2.0”已安装完成。$\r$\n$\r$\n请以日常使用的普通用户身份双击桌面“昌福里社区电梯管理系统 2.0”，打开桌面窗口后即可直接进入免登录工作台。若本机存有 1.x 旧版台账，首次启动会在当前用户数据目录安全复制旧台账，且不改动旧版目录。$\r$\n$\r$\n关闭主机桌面窗口会停止服务（端口 8766）；局域网访问期间请保持窗口打开。打开数据目录、停止系统与卸载入口位于开始菜单“昌福里社区电梯管理系统 2.0”。"
 !define MUI_UNCONFIRMPAGE_TEXT_TOP "卸载将停止本机正在运行的 2.0 服务，并仅移除当前 2.0 安装目录中的程序文件、快捷方式及 8766 防火墙规则。用户数据目录（%LOCALAPPDATA%\${APP_ID}）中的台账、附件、备份以及旧版 1.x 目录均会完整保留。"
 
 !insertmacro MUI_PAGE_WELCOME

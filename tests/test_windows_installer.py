@@ -1,17 +1,20 @@
 """Build-input, staging, 2.0 identity, directory selection and NSIS compilation checks; no live business data is used."""
 import importlib.util
+import io
 import json
 from pathlib import Path
 import re
 import shutil
 import stat
+import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 from zipfile import ZipFile, ZipInfo
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageStat
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location('windows_installer_builder', ROOT / 'scripts/build_windows_installer.py')
@@ -73,7 +76,7 @@ class WindowsInstallerTest(unittest.TestCase):
         runtime.write_bytes(b'untrusted input')
         output = self.root / 'output'; output.mkdir()
         with self.assertRaisesRegex(ValueError, 'SHA256'):
-            builder.stage_application(runtime, self.root, output, '2.0.1')
+            builder.stage_application(runtime, self.root, output, '2.0.2')
         self.assertEqual(list(output.iterdir()), [])
         source = self.root / 'outside.txt'; source.write_text('must not be copied')
         link = self.root / 'link.txt'
@@ -122,65 +125,134 @@ class WindowsInstallerTest(unittest.TestCase):
             (packages / 'demo.py').write_text('VALUE=1', encoding='utf-8')
 
         with patch.object(builder, 'ROOT', source), patch.object(builder, 'PYTHON_SHA256', builder.sha256(python_zip)), patch.object(builder.subprocess, 'run', install):
-            stage = builder.stage_application(python_zip, self.root, output, '2.0.1')
+            stage = builder.stage_application(python_zip, self.root, output, '2.0.2')
             self.assertEqual((stage / 'runtime/python312._pth').read_text(), builder.PTH_CONTENT)
             self.assertFalse((stage / 'data').exists())
+            self.assertFalse((stage / 'seed').exists())
+            self.assertFalse((stage / 'seed/official-ledger.xlsx').exists())
             self.assertFalse((stage / 'backend/__pycache__').exists())
             self.assertFalse((stage / 'tests').exists())
             self.assertTrue((stage / builder.APP_ICON_ICO).is_file())
             self.assertTrue((stage / builder.APP_ICON_PNG).is_file())
             manifest = json.loads((stage / 'BUILD-MANIFEST.json').read_text())
             self.assertEqual(manifest['product'], 'ChangfuliElevatorDesktop')
-            self.assertEqual(manifest['version'], '2.0.1')
+            self.assertEqual(manifest['version'], '2.0.2')
+            self.assertNotIn('seed/official-ledger.xlsx', manifest['files'])
             for name, digest in manifest['files'].items():
                 self.assertEqual(builder.sha256(stage / name), digest)
             self.assertTrue((stage / 'licenses/demo-1.0.dist-info/LICENSE').is_file())
             self.assertFalse(list(stage.rglob('*.xlsx')))
+            # Even if source/seed/official-ledger.xlsx exists, default stage never copies it without --seed-ledger.
+            unrequested_seed = source / 'seed/official-ledger.xlsx'
+            unrequested_seed.parent.mkdir(parents=True, exist_ok=True)
+            unrequested_seed.write_bytes(b'do not stage by default')
+            stage = builder.stage_application(python_zip, self.root, output, '2.0.2')
+            self.assertFalse((stage / 'seed').exists())
+            self.assertFalse(list(stage.rglob('*.xlsx')))
+            # Unrequested .xlsx inside a copied directory tree must also be rejected on default empty build.
+            stray_xlsx = source / 'frontend/dist/unwanted.xlsx'
+            stray_xlsx.write_bytes(b'unwanted')
+            try:
+                with self.assertRaisesRegex(ValueError, 'unwanted.xlsx'):
+                    builder.stage_application(python_zip, self.root, output, '2.0.2')
+            finally:
+                stray_xlsx.unlink()
             fixture = ROOT / 'tests/fixtures/synthetic-ledger-fixture.xlsx'
-            stage = builder.stage_application(python_zip, self.root, output, '2.0.1', seed_ledger=fixture)
+            stage = builder.stage_application(python_zip, self.root, output, '2.0.2', seed_ledger=fixture)
             manifest = json.loads((stage / 'BUILD-MANIFEST.json').read_text())
             self.assertEqual(manifest['files']['seed/official-ledger.xlsx'], builder.sha256(fixture))
             self.assertEqual((stage / 'seed/official-ledger.xlsx').read_bytes(), fixture.read_bytes())
+            # Subsequent default empty stage must wipe any prior stage/seed/official-ledger.xlsx.
+            stage = builder.stage_application(python_zip, self.root, output, '2.0.2')
+            self.assertFalse((stage / 'seed').exists())
+            self.assertFalse(list(stage.rglob('*.xlsx')))
             (stage / 'BUILD-MANIFEST.json').unlink()
             with self.assertRaises(ValueError):
-                builder.stage_application(python_zip, self.root, output, '2.0.1')
+                builder.stage_application(python_zip, self.root, output, '2.0.2')
             self.assertTrue((stage / 'backend/main.py').is_file())
 
-    def test_new_brand_icons_are_multisize_emblem_and_home_hero_remains_lobby_photo(self):
+    def test_brand_icons_are_rebuilt_from_first_version_white_27_ico_and_versions_are_2_0_2(self):
+        source_ico_path = ROOT / 'scripts/windows-app.ico'
         ico_path = ROOT / 'scripts/desktop-app-2.0.ico'
         png_path = ROOT / 'scripts/desktop-app-2.0.png'
         web_png_path = ROOT / 'frontend/src/assets/desktop-app-2.0.png'
+        self.assertTrue(source_ico_path.is_file())
         self.assertTrue(ico_path.is_file())
         self.assertTrue(png_path.is_file())
         self.assertTrue(web_png_path.is_file())
+
+        def read_ico_frames(path: Path):
+            raw = path.read_bytes()
+            reserved, ico_type, count = struct.unpack_from('<HHH', raw, 0)
+            self.assertEqual((reserved, ico_type), (0, 1))
+            frames = {}
+            for idx in range(count):
+                w, h, _, _, _, _, size, offset = struct.unpack_from('<BBBBHHII', raw, 6 + idx * 16)
+                actual_w = 256 if w == 0 else w
+                actual_h = 256 if h == 0 else h
+                self.assertEqual(actual_w, actual_h)
+                frames[actual_w] = Image.open(io.BytesIO(raw[offset:offset + size])).convert('RGBA')
+            return frames
+
+        expected_sizes = {(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)}
         with Image.open(ico_path) as ico:
             self.assertEqual(ico.format, 'ICO')
-            self.assertTrue({(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)}.issubset(ico.info.get('sizes', set())))
+            self.assertTrue(expected_sizes.issubset(ico.info.get('sizes', set())))
+
+        orig_frames = read_ico_frames(source_ico_path)
+        new_frames = read_ico_frames(ico_path)
+        self.assertEqual(set(new_frames), {16, 24, 32, 48, 64, 128, 256})
+
+        # Rendered 256px and 64px frames visually match the original white-27 mark, not emblem or cobalt tile.
+        for sz in (64, 256):
+            diff = ImageChops.difference(new_frames[sz], orig_frames[sz])
+            for channel_mean in ImageStat.Stat(diff).mean:
+                self.assertLess(channel_mean, 1.0)
+        # 16px frame stays faithful to the original white-27 mark while maintaining sharp ink/bar contrast.
+        diff_16 = ImageChops.difference(new_frames[16], orig_frames[16])
+        for channel_mean in ImageStat.Stat(diff_16).mean:
+            self.assertLess(channel_mean, 12.0)
+        frame16 = new_frames[16]
+        # White card background, dark "27" ink, and cobalt right vertical bar are all distinct at 16px.
+        self.assertTrue(any(frame16.getpixel((x, 2))[:3] == (255, 255, 255) for x in range(4, 12)))
+        min_luma_16 = min(sum(frame16.getpixel((x, y))[:3]) / 3 for y in range(4, 12) for x in range(2, 11))
+        self.assertLess(min_luma_16, 50)
+        max_blue_excess_16 = max(frame16.getpixel((x, 8))[2] - frame16.getpixel((x, 8))[0] for x in range(12, 16))
+        self.assertGreater(max_blue_excess_16, 60)
+
         for icon_file in (png_path, web_png_path):
             with Image.open(icon_file) as png:
                 self.assertEqual(png.format, 'PNG')
                 self.assertEqual(png.mode, 'RGBA')
                 self.assertGreaterEqual(png.size[0], 256)
                 self.assertEqual(png.size[0], png.size[1])
-                w, h = png.size
-                # Rounded plaque cropped tightly: corners are transparent, edge midpoints are opaque plaque.
-                self.assertEqual(png.getpixel((0, 0))[3], 0)
-                self.assertEqual(png.getpixel((w // 2, 2))[3], 255)
-                self.assertEqual(png.getpixel((2, h // 2))[3], 255)
-                # Center is warm elevator door light gap (not the retired flat cobalt #435ddd tile).
-                center = png.getpixel((w // 2, h // 2))
-                self.assertGreater(center[0], center[2])
-                self.assertNotEqual(center[:3], (67, 93, 221))
-                # Rich stone/steel emblem rather than a 2-3 color flat vector tile.
-                sampled = {png.getpixel((x, h // 2))[:3] for x in range(10, w - 10, 4)}
-                self.assertGreater(len(sampled), 40)
-        self.assertNotEqual(ico_path.read_bytes(), (ROOT / 'scripts/windows-app.ico').read_bytes())
+                rendered = png.convert('RGBA').resize((256, 256), Image.Resampling.LANCZOS)
+                diff = ImageChops.difference(rendered, orig_frames[256])
+                for channel_mean in ImageStat.Stat(diff).mean:
+                    self.assertLess(channel_mean, 1.0)
+                # Corners are transparent; card background is pure white (not travertine stone or flat cobalt #435ddd).
+                self.assertEqual(rendered.getpixel((0, 0))[3], 0)
+                self.assertEqual(rendered.getpixel((128, 24)), (255, 255, 255, 255))
+                self.assertNotEqual(rendered.getpixel((128, 24))[:3], (67, 93, 221))
+
         index_html = (ROOT / 'frontend/index.html').read_text(encoding='utf-8')
         self.assertIn('/src/assets/desktop-app-2.0.png', index_html)
-        self.assertIn('2.0.1', index_html)
+        self.assertIn('昌福里社区电梯管理系统 2.0.2', index_html)
+        self.assertNotIn('2.0.1', index_html)
+
+        package_json = json.loads((ROOT / 'frontend/package.json').read_text(encoding='utf-8'))
+        self.assertEqual(package_json['version'], '2.0.2')
+
         app_vue = (ROOT / 'frontend/src/App.vue').read_text(encoding='utf-8')
         self.assertIn("./assets/elevator-lobby.jpg", app_vue)
         self.assertNotIn('architecture.svg', app_vue)
+        self.assertIn('打开即可使用 · 无需登录 · 2.0.2', app_vue)
+        self.assertIn('本机与局域网 · 版本 2.0.2', app_vue)
+        self.assertIn('一梯一档 · 2.0.2', app_vue)
+        self.assertNotIn('2.0.1', app_vue)
+
+        self.assertIn('2.0.2', (ROOT / 'scripts/run.py').read_text(encoding='utf-8'))
+        self.assertIn('2.0.2', (ROOT / 'scripts/package_release.py').read_text(encoding='utf-8'))
 
     def test_nsis_directory_page_honors_user_choice_and_separates_2_0_identity(self):
         text = (ROOT / 'scripts/windows_installer.nsi').read_text(encoding='utf-8')
@@ -212,7 +284,7 @@ class WindowsInstallerTest(unittest.TestCase):
 
         # 2.0 identity, port 8766, distinct shortcuts, and no elevated LocalAppData DB creation.
         self.assertIn('!define APP_ID "ChangfuliElevatorDesktop"', uncommented)
-        self.assertIn('!define APP_VERSION "2.0.1"', uncommented)
+        self.assertIn('!define APP_VERSION "2.0.2"', uncommented)
         self.assertIn('!define FIREWALL_RULE "ChangfuliElevatorDesktop.PrivateLAN.8766"', uncommented)
         self.assertIn('localport=8766 program="$INSTDIR\\runtime\\pythonw.exe"', text)
         self.assertIn('Icon "${ICON_FILE}"', uncommented)
@@ -268,6 +340,62 @@ class WindowsInstallerTest(unittest.TestCase):
         target = self.root / 'fixture-installer.exe'
         subprocess.run([shutil.which('makensis'), '-V2', f'-DSTAGE_DIR={stage}', f'-DOUT_FILE={target}', str(source)], check=True)
         self.assertEqual(target.read_bytes()[:2], b'MZ')
+
+        # Also run default build_windows_installer.py CLI flow without --seed-ledger and verify empty stage + 2.0.2 exe.
+        project, output = self.root / 'default-project', self.root / 'default-output'
+        project.mkdir(); output.mkdir()
+        for rel, content in {
+            'requirements.lock.txt': 'demo==1.0\n',
+            'backend/__init__.py': '',
+            'backend/main.py': 'VALUE = 1\n',
+            'scripts/windows_launcher.py': 'pass\n',
+            'frontend/dist/index.html': '<!doctype html><title>昌福里社区电梯管理系统 2.0.2</title>',
+            'docs/WINDOWS_INSTALLER.md': 'install docs',
+            'USER_GUIDE.md': 'user guide',
+        }.items():
+            dst = project / rel; dst.parent.mkdir(parents=True, exist_ok=True); dst.write_text(content, encoding='utf-8')
+        shutil.copyfile(ROOT / f'scripts/{builder.APP_ICON_ICO}', project / f'scripts/{builder.APP_ICON_ICO}')
+        shutil.copyfile(ROOT / f'scripts/{builder.APP_ICON_PNG}', project / f'scripts/{builder.APP_ICON_PNG}')
+        shutil.copyfile(ROOT / 'scripts/windows_installer.nsi', project / 'scripts/windows_installer.nsi')
+        python_zip = self.root / 'python-embed.zip'
+        with ZipFile(python_zip, 'w') as archive:
+            for name in ('python.exe', 'pythonw.exe', 'python312.dll', 'python312.zip', 'python312._pth', 'LICENSE.txt'):
+                archive.writestr(name, 'runtime fixture')
+        self.wheel()
+        real_run = subprocess.run
+
+        def run_pip_or_makensis(arguments, **kwargs):
+            if len(arguments) >= 3 and arguments[1:3] == ['-m', 'pip']:
+                packages = Path(arguments[arguments.index('--target') + 1])
+                info = packages / 'demo-1.0.dist-info'; info.mkdir(parents=True)
+                (info / 'METADATA').write_text('Name: demo\nVersion: 1.0\n', encoding='utf-8')
+                (info / 'LICENSE').write_text('fixture license', encoding='utf-8')
+                (packages / 'demo.py').write_text('VALUE = 1\n', encoding='utf-8')
+                return None
+            return real_run(arguments, **kwargs)
+
+        argv = [
+            'build_windows_installer.py',
+            '--python-zip', str(python_zip),
+            '--wheelhouse', str(self.root),
+            '--output-dir', str(output),
+        ]
+        with patch.object(builder, 'ROOT', project), \
+                patch.object(builder, 'PYTHON_SHA256', builder.sha256(python_zip)), \
+                patch.object(builder.subprocess, 'run', side_effect=run_pip_or_makensis), \
+                patch.object(sys, 'argv', argv):
+            builder.main()
+        built_exe = output / 'ChangfuliElevatorDesktop-Setup-2.0.2-x64.exe'
+        self.assertTrue(built_exe.is_file())
+        self.assertEqual(built_exe.read_bytes()[:2], b'MZ')
+        self.assertTrue(built_exe.with_suffix('.exe.sha256').is_file())
+        staged = output / 'stage'
+        self.assertFalse((staged / 'seed').exists())
+        self.assertFalse((staged / 'seed/official-ledger.xlsx').exists())
+        self.assertEqual(list(staged.rglob('*.xlsx')), [])
+        manifest = json.loads((staged / 'BUILD-MANIFEST.json').read_text(encoding='utf-8'))
+        self.assertEqual(manifest['version'], '2.0.2')
+        self.assertNotIn('seed/official-ledger.xlsx', manifest['files'])
 
 
 if __name__ == '__main__':

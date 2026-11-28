@@ -70,8 +70,8 @@ async def app(scope, receive, send):
         self.assertEqual(launcher.APP_ID, 'ChangfuliElevatorDesktop')
         self.assertNotEqual(launcher.APP_ID, 'ChangfuliElevatorLedger')
         self.assertEqual(launcher.PORT, 8766)
-        self.assertEqual(launcher.APP_VERSION, '2.0.1')
-        self.assertEqual(launcher.WINDOW_TITLE, '昌福里社区电梯管理系统 2.0.1')
+        self.assertEqual(launcher.APP_VERSION, '2.0.2')
+        self.assertEqual(launcher.WINDOW_TITLE, '昌福里社区电梯管理系统 2.0.2')
         self.assertNotEqual(launcher.LOCK_FILE, 'runtime-instance.lock')
         self.assertNotEqual(launcher.STATE_FILE, 'runtime-instance.json')
 
@@ -241,7 +241,7 @@ async def app(scope, receive, send):
         status, identity = request(launcher.IDENTITY_PATH, 'GET', headers=[(b'x-launcher-challenge', challenge.encode())])
         self.assertEqual(status, 200)
         self.assertEqual(identity['app'], 'ChangfuliElevatorDesktop')
-        self.assertEqual(identity['version'], '2.0.1')
+        self.assertEqual(identity['version'], '2.0.2')
         self.assertEqual(identity['proof'], launcher.signature(secret, challenge))
         self.assertNotIn(secret, json.dumps(identity))
 
@@ -466,11 +466,14 @@ async def app(scope, receive, send):
             self.assertEqual(conn.execute('SELECT name FROM elevators').fetchall(), [('1号电梯',)])
         self.assertTrue((local_legacy2 / 'data/elevator.db').is_file())
 
-        # 3) Empty migrated 1.x DB + installed program_root/seed/official-ledger.xlsx -> configure_seed_ledger + seed succeeds!
+        # 3) Empty program_root without seed file leaves ELEVATOR_SEED_LEDGER unset; existing seed file sets it.
+        os.environ['ELEVATOR_SEED_LEDGER'] = str(self.root / 'missing-seed.xlsx')
+        self.assertIsNone(launcher.configure_seed_ledger(self.program))
+        self.assertIsNone(os.environ.get('ELEVATOR_SEED_LEDGER'))
+
         installed_seed = self.program / 'seed/official-ledger.xlsx'
         installed_seed.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(FIXTURE_LEDGER, installed_seed)
-        os.environ.pop('ELEVATOR_SEED_LEDGER', None)
         configured_seed = launcher.configure_seed_ledger(self.program)
         self.assertEqual(configured_seed, installed_seed.resolve())
         self.assertEqual(os.environ.get('ELEVATOR_SEED_LEDGER'), str(installed_seed.resolve()))
@@ -575,7 +578,7 @@ async def app(scope, receive, send):
                 # Simulate an old 1.x window still open alongside our 2.0 window.
                 if title == '昌福里社区电梯管理系统':
                     raise AssertionError('Must never query the 1.x window title')
-                return 123 if title == '昌福里社区电梯管理系统 2.0.1' else 0
+                return 123 if title == '昌福里社区电梯管理系统 2.0.2' else 0
 
             api.FindWindowW.side_effect = find_window
 
@@ -585,7 +588,7 @@ async def app(scope, receive, send):
 
             api.GetWindowThreadProcessId.side_effect = get_owner
             launcher.activate_existing_window(45)
-            api.FindWindowW.assert_called_once_with(None, '昌福里社区电梯管理系统 2.0.1')
+            api.FindWindowW.assert_called_once_with(None, '昌福里社区电梯管理系统 2.0.2')
             api.ShowWindow.assert_called_once()
             api.SetForegroundWindow.assert_called_once()
             api.MessageBoxW.assert_not_called()
@@ -649,7 +652,7 @@ async def app(scope, receive, send):
                     self.assertEqual(os.environ['WEBVIEW2_USER_DATA_FOLDER'], expected_wv2)
                     self.assertEqual(gui.start.call_args.kwargs['storage_path'], expected_wv2)
                 gui.create_window.assert_called_once_with(
-                    '昌福里社区电梯管理系统 2.0.1', 'http://127.0.0.1:8766',
+                    '昌福里社区电梯管理系统 2.0.2', 'http://127.0.0.1:8766',
                     width=1440, height=900, maximized=True, text_select=True,
                 )
                 self.assertEqual(gui.start.call_args.kwargs['gui'], 'edgechromium')

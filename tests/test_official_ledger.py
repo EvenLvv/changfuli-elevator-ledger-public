@@ -199,19 +199,40 @@ class OfficialLedgerTest(unittest.TestCase):
             self.assertEqual(len(client.get('/api/elevators').json()), 9)
             self.assertTrue(json.loads(report_path.read_text(encoding='utf-8'))['committed'])
 
-    def test_seed_status_reports_counts_and_redacts_registration_numbers_on_failure_or_missing(self):
+    def test_seed_status_does_not_warn_without_seed_and_reports_counts_or_redacted_failure_with_seed(self):
         from backend.db import connect
-        # 1) Missing seed on empty DB
-        missing = self.client.get('/api/seed-status').json()
-        self.assertEqual(missing['status'], 'missing')
-        self.assertFalse(missing['committed'])
-        self.assertEqual((missing['elevator_count'], missing['event_count']), (0, 0))
-        self.assertIn('logs/seed-import-report.json', missing['message'])
-        self.assertNotIn('测C-', json.dumps(missing, ensure_ascii=False))
-        self.assertEqual(self.client.get('/api/dashboard').json()['seed_status']['status'], 'missing')
+        from backend import main
+        # 1) No seed file on empty DB -> normal empty workstation, no warning/error/message
+        empty = self.client.get('/api/seed-status').json()
+        self.assertEqual(empty['status'], 'empty')
+        self.assertFalse(empty['seed_present'])
+        self.assertFalse(empty['committed'])
+        self.assertEqual((empty['elevator_count'], empty['event_count']), (0, 0))
+        self.assertEqual(empty['error'], '')
+        self.assertEqual(empty['message'], '')
+        self.assertNotIn('预置台账尚未导入', json.dumps(empty, ensure_ascii=False))
+        self.assertNotIn('未检测到随包预置台账', json.dumps(empty, ensure_ascii=False))
+        self.assertEqual(self.client.get('/api/dashboard').json()['seed_status'], empty)
+
+        # Even if a stale failed report file exists, no warning is emitted when no seed file is present.
+        (self.paths['LOGS'] / 'seed-import-report.json').write_text(
+            json.dumps({'committed': False, 'error': '旧报告'}), encoding='utf-8'
+        )
+        still_empty = self.client.get('/api/seed-status').json()
+        self.assertEqual(still_empty['status'], 'empty')
+        self.assertFalse(still_empty['seed_present'])
+        self.assertEqual(still_empty['error'], '')
+        self.assertEqual(still_empty['message'], '')
+        (self.paths['LOGS'] / 'seed-import-report.json').unlink()
+
+        # Verify Home and 电梯档案 UI source never nags on empty installations without a seed file.
+        app_vue = (Path(__file__).resolve().parents[1] / 'frontend/src/App.vue').read_text(encoding='utf-8')
+        self.assertNotIn('预置台账尚未导入', app_vue)
+        self.assertNotIn('未检测到随包预置台账', app_vue)
+        self.assertIn("seedStatus.value?.seed_present && (seedStatus.value.status === 'imported' || seedStatus.value.status === 'failed')", app_vue)
+        self.assertEqual(app_vue.count('v-if="visibleSeedBanner"'), 2)
 
         # 2) Failed seed must set committed=False, not insert official_ledger_imported, and never leak 测C-
-        from backend import main
         seed = main.ROOT / 'seed/official-ledger.xlsx'
         seed.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(FIXTURE, seed)
@@ -227,6 +248,7 @@ class OfficialLedgerTest(unittest.TestCase):
             self.assertIsNone(db.execute("SELECT 1 FROM system_settings WHERE key='official_ledger_imported'").fetchone())
         failed = self.client.get('/api/seed-status').json()
         self.assertEqual(failed['status'], 'failed')
+        self.assertTrue(failed['seed_present'])
         self.assertFalse(failed['committed'])
         self.assertIn('logs/seed-import-report.json', failed['message'])
         self.assertNotIn('测C-', json.dumps(failed, ensure_ascii=False))
@@ -235,6 +257,7 @@ class OfficialLedgerTest(unittest.TestCase):
         self.restart()
         imported = self.client.get('/api/seed-status').json()
         self.assertEqual(imported['status'], 'imported')
+        self.assertTrue(imported['seed_present'])
         self.assertTrue(imported['committed'])
         self.assertEqual((imported['seed_elevators'], imported['seed_events']), (9, 5))
         self.assertEqual((imported['elevator_count'], imported['event_count']), (9, 5))

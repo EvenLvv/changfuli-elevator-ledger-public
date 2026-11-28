@@ -26,8 +26,8 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 APP_ID = 'ChangfuliElevatorDesktop'
 LEGACY_APP_ID = 'ChangfuliElevatorLedger'
-APP_VERSION = '2.0.1'
-WINDOW_TITLE = '昌福里社区电梯管理系统 2.0.1'
+APP_VERSION = '2.0.2'
+WINDOW_TITLE = '昌福里社区电梯管理系统 2.0.2'
 ICON_NAME = 'desktop-app-2.0.ico'
 WEBVIEW2_ERROR = '无法打开桌面窗口。请安装或修复 Microsoft Edge WebView2 Runtime，然后重新打开电梯管理系统。'
 PORT = 8766
@@ -88,6 +88,12 @@ def configure_seed_ledger(program_root=None):
     if _safe_legacy_entry(seed_file, directory=False):
         os.environ['ELEVATOR_SEED_LEDGER'] = str(seed_file)
         return seed_file
+    configured = os.environ.get('ELEVATOR_SEED_LEDGER', '')
+    if configured:
+        candidate = Path(configured)
+        if candidate.is_absolute() and _safe_legacy_entry(candidate, directory=False):
+            return candidate
+        os.environ.pop('ELEVATOR_SEED_LEDGER', None)
     return None
 
 

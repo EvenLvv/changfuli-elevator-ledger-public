@@ -169,8 +169,11 @@ def stage_application(python_zip, wheelhouse, output_dir, version, seed_ledger=N
         if seed_ledger is not None:
             copy_file(seed_ledger, stage / 'seed/official-ledger.xlsx')
         collect_licenses(stage)
+        forbidden_suffixes = {'.db', '.sqlite', '.sqlite3', '.log', '.pyc'}
+        if seed_ledger is None:
+            forbidden_suffixes.add('.xlsx')
         for path in stage.rglob('*'):
-            if path.is_file() and path.suffix.lower() in ('.db', '.sqlite', '.sqlite3', '.log', '.pyc'):
+            if path.is_file() and path.suffix.lower() in forbidden_suffixes:
                 raise ValueError(f'Runtime data or compiled host files entered staging: {path}')
         manifest = {'product': APP_ID, 'version': version, 'python_version': PYTHON_VERSION,
                     'python_zip_sha256': PYTHON_SHA256, 'requirements_sha256': sha256(lock),
@@ -198,7 +201,7 @@ def main():
     parser.add_argument('--python-zip', type=Path, required=True, help='Official python-3.12.10-embed-amd64.zip')
     parser.add_argument('--wheelhouse', type=Path, default=ROOT / 'wheelhouse')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'outputs/windows-installer')
-    parser.add_argument('--version', default='2.0.1')
+    parser.add_argument('--version', default='2.0.2')
     parser.add_argument('--seed-ledger', type=Path, help='Explicitly copy this private workbook into the installer stage')
     parser.add_argument('--makensis', default=shutil.which('makensis'))
     parser.add_argument('--stage-only', action='store_true')

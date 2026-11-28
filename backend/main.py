@@ -431,6 +431,21 @@ def seed_status_data(db):
             saved = None
     report = _read_seed_report_file()
     report_rel = 'logs/seed-import-report.json'
+    seed_present = _find_seed_ledger_path() is not None
+
+    if not seed_present:
+        return {
+            'status': 'ready' if total_elevators > 0 else 'empty',
+            'seed_present': False,
+            'committed': False,
+            'elevator_count': elevator_count,
+            'event_count': event_count,
+            'seed_elevators': 0,
+            'seed_events': 0,
+            'report_path': report_rel,
+            'error': '',
+            'message': '',
+        }
 
     if total_elevators > 0:
         if saved and saved.get('committed') is True:
@@ -438,6 +453,7 @@ def seed_status_data(db):
             seed_events = int(saved.get('events_added') or 0)
             return {
                 'status': 'imported',
+                'seed_present': True,
                 'committed': True,
                 'elevator_count': elevator_count,
                 'event_count': event_count,
@@ -452,6 +468,7 @@ def seed_status_data(db):
             }
         return {
             'status': 'ready',
+            'seed_present': True,
             'committed': False,
             'elevator_count': elevator_count,
             'event_count': event_count,
@@ -459,13 +476,14 @@ def seed_status_data(db):
             'seed_events': 0,
             'report_path': report_rel,
             'error': '',
-            'message': f'当前在册 {elevator_count} 部电梯、{event_count} 条工作记录。',
+            'message': '',
         }
 
     if report and report.get('committed') is False:
         err = _sanitize_seed_error(report.get('error') or '无法读取或写入初始台账')
         return {
             'status': 'failed',
+            'seed_present': True,
             'committed': False,
             'elevator_count': 0,
             'event_count': 0,
@@ -473,33 +491,19 @@ def seed_status_data(db):
             'seed_events': 0,
             'report_path': report_rel,
             'error': err,
-            'message': f'预置台账尚未成功导入（{err}）。请查看数据目录下的 {report_rel}，处理后重新打开程序将自动重试。',
-        }
-    if _find_seed_ledger_path() is not None:
-        return {
-            'status': 'pending',
-            'committed': False,
-            'elevator_count': 0,
-            'event_count': 0,
-            'seed_elevators': 0,
-            'seed_events': 0,
-            'report_path': report_rel,
-            'error': '检测到预置台账尚未导入',
-            'message': f'检测到预置台账尚未导入，请重新打开程序自动建账；若仍未导入，请查看数据目录下的 {report_rel}。',
+            'message': f'初始台账导入失败（{err}）。请查看数据目录下的 {report_rel}，处理后重新打开程序将自动重试。',
         }
     return {
-        'status': 'missing',
+        'status': 'pending',
+        'seed_present': True,
         'committed': False,
         'elevator_count': 0,
         'event_count': 0,
         'seed_elevators': 0,
         'seed_events': 0,
         'report_path': report_rel,
-        'error': '未检测到随包预置台账',
-        'message': (
-            f'当前尚未导入预置台账。若使用内部建账安装包，请查看数据目录下的 {report_rel} '
-            '并重新打开程序重试；也可在“电梯档案”中新增或导入档案。'
-        ),
+        'error': '',
+        'message': '',
     }
 
 
