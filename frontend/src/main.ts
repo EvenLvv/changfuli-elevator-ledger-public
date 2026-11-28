@@ -8,7 +8,7 @@ import './style.css'
 
 const routes = [
   '/', '/elevators', '/elevators/:id', '/events/new', '/events/:id/edit',
-  '/records', '/search', '/reminders', '/export', '/admin'
+  '/records', '/photos', '/search', '/reminders', '/export', '/admin'
 ].map(path => ({path, component: {render: () => null}}))
 const router = createRouter({history:createWebHistory(), routes})
 createApp(App).use(router).use(ElementPlus,{locale:zhCn}).mount('#app')
