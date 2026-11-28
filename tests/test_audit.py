@@ -43,6 +43,63 @@ class AcceptanceAudit(unittest.TestCase):
         record = self.client.get(f'/api/events/{event}').json()
         self.assertEqual((record['cost_auto'], record['cost_cents']), (0, 0))
 
+    def test_replacement_fund_validates_and_stays_separate_from_legacy_costs(self):
+        from backend.db import connect, init_db
+
+        legacy = self.event(type='配件更换', cost_yuan='200', parts=[{'name':'旧门锁','unit_price_yuan':'200'}])
+        with connect() as db:
+            db.execute('ALTER TABLE events DROP COLUMN maintenance_fund_cents')
+        init_db(); init_db()
+        legacy_record = self.client.get(f'/api/events/{legacy}').json()
+        self.assertIsNone(legacy_record['maintenance_fund_cents'])
+        self.assertEqual(legacy_record['parts'][0]['unit_price_cents'], 20000)
+        self.event(type='故障', notes='原表标注维修资金，金额未登记')
+
+        parts = [{'name':'门锁','quantity':2}, {'name':'滚轮'}]
+        payload = {'elevator_id':self.elevator, 'title':'更换门锁和滚轮', 'type':'维修',
+                   'occurred_on':self.today, 'parts':parts}
+        for changes in ({'uses_maintenance_fund':False, 'maintenance_fund_yuan':'10'},
+                        {'uses_maintenance_fund':True},
+                        {'uses_maintenance_fund':True, 'maintenance_fund_yuan':'0'},
+                        {'uses_maintenance_fund':True, 'maintenance_fund_yuan':'-0.01'},
+                        {'uses_maintenance_fund':True, 'maintenance_fund_yuan':'1.001'},
+                        {'uses_maintenance_fund':True, 'maintenance_fund_yuan':'10', 'parts':[]}):
+            with self.subTest(changes=changes):
+                response = self.client.post('/api/events', json={**payload, **changes})
+                self.assertEqual(response.status_code, 400, response.text)
+
+        event = self.post('/api/events', {**payload, 'uses_maintenance_fund':True, 'maintenance_fund_yuan':'325.15'})['id']
+        endpoint = f'/api/events/{event}'
+        self.assertEqual(self.client.put(endpoint, json=payload).status_code, 200)
+        record = self.client.get(endpoint).json()
+        self.assertTrue(record['uses_maintenance_fund'])
+        self.assertEqual(record['maintenance_fund_cents'], 32515)
+        self.assertEqual(record['cost_cents'], 0)
+        total = self.client.get('/api/costs', params={'elevator_id':self.elevator}).json()
+        self.assertEqual(total, {'cost_cents':20000, 'maintenance_fund_cents':32515, 'record_count':3})
+        lift = self.client.get(f'/api/elevators/{self.elevator}').json()
+        self.assertEqual(lift['total_cost_cents'], 20000)
+        self.assertEqual(lift['total_maintenance_fund_cents'], 32515)
+
+        filters = {'scope':'elevator', 'elevator_id':self.elevator}
+        draft = self.post('/api/export-drafts', filters)
+        draft_text = '\n'.join(block.get('text', '') for block in draft['blocks'])
+        self.assertEqual(draft_text.count('住宅维修基金金额：325.15元'), 1)
+        self.assertIn('历史登记费用：200.00元', draft_text)
+        self.assertIn('原表标注维修资金，金额未登记', draft_text)
+        raw = self.client.get('/api/export', params=filters)
+        self.assertEqual(raw.status_code, 200)
+        word_text = '\n'.join(p.text for p in Document(io.BytesIO(raw.content)).paragraphs)
+        self.assertIn('本周期住宅维修基金金额合计：325.15元', word_text)
+        self.assertIn('本周期一般登记费用合计：200.00元', word_text)
+        self.assertIn('原表标注维修资金，金额未登记', word_text)
+
+        self.assertEqual(self.client.put(endpoint, json={**payload, 'uses_maintenance_fund':False}).status_code, 200)
+        cleared = self.client.get(endpoint).json()
+        self.assertFalse(cleared['uses_maintenance_fund'])
+        self.assertIsNone(cleared['maintenance_fund_cents'])
+        self.assertEqual(self.client.get('/api/costs').json()['maintenance_fund_cents'], 0)
+
     def test_inline_elevator_location_and_edit(self):
         data = {'building_name':'20栋','unit_name':'2单元','name':'2号梯','equipment_number':'000021'}
         lift = self.post('/api/elevators',data)['id']
