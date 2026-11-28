@@ -114,6 +114,12 @@ class WindowsInstallerTest(unittest.TestCase):
             for name, digest in manifest['files'].items():
                 self.assertEqual(builder.sha256(stage / name), digest)
             self.assertTrue((stage / 'licenses/demo-1.0.dist-info/LICENSE').is_file())
+            self.assertFalse(list(stage.rglob('*.xlsx')))
+            fixture = ROOT / 'tests/fixtures/synthetic-ledger-fixture.xlsx'
+            stage = builder.stage_application(python_zip, self.root, output, '1.1.0', seed_ledger=fixture)
+            manifest = json.loads((stage / 'BUILD-MANIFEST.json').read_text())
+            self.assertEqual(manifest['files']['seed/official-ledger.xlsx'], builder.sha256(fixture))
+            self.assertEqual((stage / 'seed/official-ledger.xlsx').read_bytes(), fixture.read_bytes())
             (stage / 'BUILD-MANIFEST.json').unlink()
             with self.assertRaises(ValueError):
                 builder.stage_application(python_zip, self.root, output, '1.0.0')

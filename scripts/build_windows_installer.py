@@ -120,7 +120,7 @@ def collect_licenses(stage):
     (target / 'THIRD_PARTY_LICENSES.txt').write_text('\n'.join(lines), encoding='utf-8')
 
 
-def stage_application(python_zip, wheelhouse, output_dir, version):
+def stage_application(python_zip, wheelhouse, output_dir, version, seed_ledger=None):
     if sha256(python_zip) != PYTHON_SHA256:
         raise ValueError('The Python ZIP SHA256 does not match the official Python 3.12.10 x64 input')
     lock = ROOT / 'requirements.lock.txt'
@@ -154,6 +154,8 @@ def stage_application(python_zip, wheelhouse, output_dir, version):
         copy_file(lock, stage / 'requirements.lock.txt')
         copy_file(ROOT / 'docs/WINDOWS_INSTALLER.md', stage / 'docs/安装使用说明.txt')
         copy_file(ROOT / 'USER_GUIDE.md', stage / 'docs/USER_GUIDE.md')
+        if seed_ledger is not None:
+            copy_file(seed_ledger, stage / 'seed/official-ledger.xlsx')
         collect_licenses(stage)
         for path in stage.rglob('*'):
             if path.is_file() and path.suffix.lower() in ('.db', '.sqlite', '.sqlite3', '.log', '.pyc'):
@@ -184,7 +186,8 @@ def main():
     parser.add_argument('--python-zip', type=Path, required=True, help='Official python-3.12.10-embed-amd64.zip')
     parser.add_argument('--wheelhouse', type=Path, default=ROOT / 'wheelhouse')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'outputs/windows-installer')
-    parser.add_argument('--version', default='1.0.0')
+    parser.add_argument('--version', default='1.1.0')
+    parser.add_argument('--seed-ledger', type=Path, help='Explicitly copy this private workbook into the installer stage')
     parser.add_argument('--makensis', default=shutil.which('makensis'))
     parser.add_argument('--stage-only', action='store_true')
     args = parser.parse_args()
@@ -194,7 +197,7 @@ def main():
         parser.error('NSIS makensis was not found; install NSIS or pass --makensis')
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    stage = stage_application(args.python_zip.resolve(), args.wheelhouse.resolve(), output_dir, args.version)
+    stage = stage_application(args.python_zip.resolve(), args.wheelhouse.resolve(), output_dir, args.version, args.seed_ledger)
     if args.stage_only:
         print(stage)
         return

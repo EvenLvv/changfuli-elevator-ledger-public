@@ -23,12 +23,13 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from .db import BACKUPS, COMMUNITY, DB, EXPORTS, LOGS, ROOT, STORAGE, audit, connect, get_one, init_db, must_exist, now, password_hash, rows, verify_password
+from .db import BACKUPS, COMMUNITY, DATA, DB, EXPORTS, LOGS, ROOT, STORAGE, audit, connect, get_one, init_db, must_exist, now, password_hash, rows, verify_password
 from .exporter import get_data, make_export
 from .drafts import (DRAFT_PHOTO_FOLDER, draft_detail, draft_metadata, draft_photo_path, draft_photos,
                      initial_blocks, make_draft_export, source_attachments, source_status)
 from .backup import create_backup
 from .archive_excel import workbook_bytes, read_records
+from .official_ledger import OfficialWorkbook, reconcile
 from .location import active_elevator_labels, add_elevator_labels, archive_number
 from .network import addresses, validate_base
 
@@ -40,6 +41,7 @@ TYPES = {"日常维保", "故障", "维修", "配件更换", "检验/检查", "�
 STATUSES = {"正常", "故障", "维修中", "停梯", "待处理"}
 CATEGORIES = {"工作现场照片", "维修记录", "维保记录", "报价单", "业主签字单", "检测报告", "验收资料", "其他"}
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf", ".doc", ".docx", ".xls", ".xlsx"}
+MAX_LEDGER = 5 * 1024 * 1024
 MAX_UPLOAD = 20 * 1024 * 1024
 PHOTO_FORMATS = {'.jpg': 'JPEG', '.jpeg': 'JPEG', '.png': 'PNG', '.webp': 'WEBP'}
 MAX_DRAFT_UPLOAD = 100 * 1024 * 1024
@@ -171,8 +173,9 @@ def setup(request: Request, data: dict = Body(...)):
         db.execute("BEGIN IMMEDIATE")
         if db.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
             error("管理员已设置", 409)
-        db.execute("INSERT INTO users(username,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?)",
-                   (username, display, password_hash(password), "admin", now()))
+        admin_id = db.execute("INSERT INTO users(username,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?)",
+                              (username, display, password_hash(password), "admin", now())).lastrowid
+    seed_empty_ledger({"id": admin_id})
     return {"ok": True}
 
 
@@ -186,6 +189,8 @@ def login(data: dict = Body(...)):
         expiry = (datetime.now().astimezone() + timedelta(days=7)).isoformat(timespec="seconds")
         db.execute("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)",
                    (hashlib.sha256(token.encode()).hexdigest(), user["id"], expiry))
+    if user["role"] == "admin":
+        seed_empty_ledger(user)
     response = JSONResponse({"id": user["id"], "display_name": user["display_name"], "role": user["role"]})
     response.set_cookie("elevator_session", token, httponly=True, samesite="strict", max_age=604800)
     return response
@@ -394,7 +399,7 @@ ELEVATOR_FIELDS = ("internal_number", "equipment_number", "brand", "model", "man
 def elevator_values(data):
     values = {field: optional_text(data.get(field), 500) for field in ELEVATOR_FIELDS}
     for field, label in (("manufactured_on", "出厂日期"), ("started_on", "投用日期"),
-                         ("inspection_on", "下次年检日期"), ("maintenance_due_on", "下次维保日期")):
+                         ("inspection_on", "年检日期"), ("maintenance_due_on", "下次维保日期")):
         values[field] = day(values[field], label)
     values["status"] = values["status"] or "正常"
     if values["status"] not in STATUSES:
@@ -483,20 +488,83 @@ def export_archives(template: bool = False, building_id: Optional[int] = None, u
                     headers={'Content-Disposition': "attachment; filename*=UTF-8''" + quote(filename)})
 
 
+def insert_official_elevator(db, data, user):
+    unit_id = resolve_unit(db, data, user, digits_only=True)
+    name = data['name']
+    if find_archive_name(db, 'elevators', name, unit_id) is not None:
+        name = f"{name}（{data['equipment_number'] or data['internal_number']}）"
+    lift_id = insert_elevator(db, {**data, 'name': name}, user, unit_id=unit_id)
+    return db.execute("""SELECT e.*, u.name unit_name, b.name building_name, NULL inactive FROM elevators e
+        JOIN units u ON u.id=e.unit_id JOIN buildings b ON b.id=u.building_id WHERE e.id=?""", (lift_id,)).fetchone()
+
+
+def seed_empty_ledger(user):
+    try:
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if (db.execute("SELECT 1 FROM system_settings WHERE key='official_ledger_imported'").fetchone()
+                    or db.execute('SELECT 1 FROM elevators LIMIT 1').fetchone()):
+                return
+            configured = Path(os.environ.get('ELEVATOR_SEED_LEDGER', ''))
+            paths = [configured] if configured.is_absolute() else []
+            paths.extend([ROOT / 'seed/official-ledger.xlsx', DATA / 'seed/official-ledger.xlsx'])
+            path = next((p for p in paths if p.is_file()), None)
+            if path is None:
+                return
+            with path.open('rb') as stream:
+                raw = stream.read(MAX_LEDGER + 1)
+            if len(raw) > MAX_LEDGER:
+                raise ValueError('表格超过5MB')
+            workbook = read_records(raw)
+            if not isinstance(workbook, OfficialWorkbook):
+                raise ValueError('初始台账须使用正式双表格式')
+            report = reconcile(db, workbook, user, insert_official_elevator, insert_event)
+            summary = {key: report[key] for key in ('added', 'skipped', 'events_added', 'events_skipped',
+                                                     'templates_skipped', 'warnings', 'unmatched')}
+            summary['committed'] = True
+            encoded = json.dumps(summary, ensure_ascii=False, indent=2)
+            db.execute("INSERT INTO system_settings(key,value) VALUES('official_ledger_imported',?)", (encoded,))
+    except Exception as exc:
+        # A bad optional seed must not lock an administrator out of a new installation.
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc) if isinstance(exc, ValueError) else '无法读取或写入初始台账'
+        encoded = json.dumps({'committed': False, 'error': detail}, ensure_ascii=False)
+    try:
+        (LOGS / 'seed-import-report.json').write_text(encoded, encoding='utf-8')
+    except OSError:
+        logging.exception('无法写入初始台账导入报告')
+
+
 @app.post('/api/elevator-archives/import')
 async def import_archives(request: Request, file: UploadFile = File(...), dry_run: bool = True, user=Depends(admin)):
     if Path(file.filename or '').suffix.lower() != '.xlsx':
-        error('请选择.xlsx格式的电梯档案模板')
+        error('请选择.xlsx格式的电梯档案或正式双表台账')
     # FastAPI's Form parameter normalizes an explicitly empty field to its default.
     preview_token = (await request.form()).get('preview_token')
-    raw = await file.read(5 * 1024 * 1024 + 1)
+    raw = await file.read(MAX_LEDGER + 1)
     await file.close()
-    if not raw or len(raw) > 5 * 1024 * 1024:
+    if not raw or len(raw) > MAX_LEDGER:
         error('表格需大于0且不超过5MB')
     try:
         records = read_records(raw)
     except Exception as exc:
         error(str(exc) if isinstance(exc, ValueError) else '无法读取表格，请使用下载的.xlsx模板')
+    if isinstance(records, OfficialWorkbook):
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            try:
+                report = reconcile(db, records, user, insert_official_elevator, insert_event)
+            except (ValueError, HTTPException) as exc:
+                db.rollback()
+                message = exc.detail if isinstance(exc, HTTPException) else str(exc)
+                return {'valid': False, 'errors': [message], 'error_count': 1, 'added': 0, 'skipped': 0, 'rows': []}
+            digest = hashlib.sha256(raw)
+            digest.update(json.dumps(report).encode())
+            token = digest.hexdigest()
+            if dry_run:
+                db.rollback()
+            elif preview_token is not None and preview_token != token:
+                error('预览后的实际位置或导入结果已变化，请重新检查表格', 409)
+            return dict(report, committed=not dry_run, preview_token=token if dry_run else None)
     errors, preview, seen = [], [], set()
     workbook_names = {}
     plan = []
@@ -671,8 +739,9 @@ def event_values(data):
     if "uses_maintenance_fund" in data or "maintenance_fund_yuan" in data:
         uses_fund = flag(data.get("uses_maintenance_fund", False), "是否动用住宅维修资金")
         amount = data.get("maintenance_fund_yuan")
-        if uses_fund:
-            cents = money(amount if amount != "" else None)
+        values["uses_maintenance_fund"] = uses_fund
+        if uses_fund and amount not in (None, ""):
+            cents = money(amount)
             if cents == 0:
                 error("请填写大于0的住宅维修基金金额")
             values["maintenance_fund_cents"] = cents
@@ -737,8 +806,8 @@ def event_full(db, event_id):
     if item:
         for field in ("completed", "stopped", "recovered"):
             item[field] = bool(item[field])
-        item["uses_maintenance_fund"] = item["maintenance_fund_cents"] is not None
-        item["maintenance_fund_yuan"] = item["maintenance_fund_cents"] / 100 if item["uses_maintenance_fund"] else None
+        item["uses_maintenance_fund"] = bool(item["uses_maintenance_fund"])
+        item["maintenance_fund_yuan"] = item["maintenance_fund_cents"] / 100 if item["maintenance_fund_cents"] is not None else None
         item["parts"] = rows(db.execute("SELECT * FROM event_parts WHERE event_id=? ORDER BY id", (event_id,)))
         for part in item["parts"]:
             part["total_price_cents"] = part["quantity"] * part["unit_price_cents"]
@@ -793,25 +862,29 @@ def update_record_status(db, data, elevator_id, user, event_id):
           after={"status": status, "event_id": event_id})
 
 
-@app.post("/api/events")
-def add_event(data: dict = Body(...), user=Depends(actor)):
+def insert_event(db, data, user):
     values = event_values(data)
     parsed_parts = event_parts(data, values)
+    if not must_exist(db, "elevators", positive_int(data.get("elevator_id"), "电梯", 1)):
+        error("请选择已有电梯")
+    stamp = now()
+    payload = {"elevator_id": data["elevator_id"], **values, "created_by": user["id"], "created_at": stamp, "updated_at": stamp}
+    fields = list(payload)
+    cursor = db.execute(f"INSERT INTO events({','.join(fields)}) VALUES({','.join('?' for _ in fields)})", list(payload.values()))
+    for part in parsed_parts:
+        fields = list(part)
+        db.execute(f"INSERT INTO event_parts(event_id,{','.join(fields)}) VALUES(?,{','.join('?' for _ in fields)})",
+                   [cursor.lastrowid, *part.values()])
+    update_record_status(db, data, data["elevator_id"], user, cursor.lastrowid)
+    audit(db, user["id"], "新增", "工作记录", cursor.lastrowid, after={**payload, "parts": parsed_parts})
+    return {"id": cursor.lastrowid, "updated_at": payload["updated_at"]}
+
+
+@app.post("/api/events")
+def add_event(data: dict = Body(...), user=Depends(actor)):
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        if not must_exist(db, "elevators", positive_int(data.get("elevator_id"), "电梯", 1)):
-            error("请选择已有电梯")
-        stamp = now()
-        payload = {"elevator_id": data["elevator_id"], **values, "created_by": user["id"], "created_at": stamp, "updated_at": stamp}
-        fields = list(payload)
-        cursor = db.execute(f"INSERT INTO events({','.join(fields)}) VALUES({','.join('?' for _ in fields)})", list(payload.values()))
-        for part in parsed_parts:
-            fields = list(part)
-            db.execute(f"INSERT INTO event_parts(event_id,{','.join(fields)}) VALUES(?,{','.join('?' for _ in fields)})",
-                       [cursor.lastrowid, *part.values()])
-        update_record_status(db, data, data["elevator_id"], user, cursor.lastrowid)
-        audit(db, user["id"], "新增", "工作记录", cursor.lastrowid, after={**payload, "parts": parsed_parts})
-    return {"id": cursor.lastrowid, "updated_at": payload["updated_at"]}
+        return insert_event(db, data, user)
 
 
 @app.put("/api/events/{event_id}")

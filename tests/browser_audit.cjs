@@ -71,7 +71,7 @@ const out=process.env.AUDIT_OUTPUT||'/private/tmp/elevator-audit-ui-output';
  await page.getByLabel('工作内容',{exact:true}).fill('更换门锁开关并检查运行情况');
  await page.getByRole('button',{name:'＋ 添加配件',exact:true}).first().click();
  const fundToggle=page.getByRole('checkbox',{name:'动用住宅维修资金',exact:true});
- const fundAmount=page.getByLabel('住宅维修基金金额（元）',{exact:true});
+ const fundAmount=page.getByLabel('住宅维修基金金额',{exact:true});
  await page.getByLabel('配件名称 *',{exact:true}).fill('门锁开关');
  assert.equal(await page.getByLabel('一般登记费用（元）',{exact:true}).count(),0);
  await fundToggle.check();await fundAmount.fill('260');

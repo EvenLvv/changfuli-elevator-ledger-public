@@ -17,7 +17,7 @@ SetDatablockOptimize on
   !error "Pass -DOUT_FILE=<installer.exe>"
 !endif
 !ifndef APP_VERSION
-  !define APP_VERSION "1.0.0"
+  !define APP_VERSION "1.1.0"
 !endif
 !ifndef PAYLOAD_KB
   !define PAYLOAD_KB 0
@@ -258,6 +258,8 @@ FunctionEnd
 
 ; Only program-owned paths are removed; the shared data directory is never passed to RMDir.
 !macro RemoveProgramFiles
+  IfFileExists "$INSTDIR\seed\official-ledger.xlsx" 0 +2
+  Delete "$INSTDIR\seed\official-ledger.xlsx"
   IfFileExists "$INSTDIR\backend\*.*" 0 +2
   RMDir /r "$INSTDIR\backend"
   IfFileExists "$INSTDIR\runtime\*.*" 0 +2
@@ -408,6 +410,7 @@ Section "Uninstall"
   ${EndIf}
   DeleteRegKey HKLM "${UNINSTALL_KEY}"
   Delete "$INSTDIR\Uninstall.exe"
+  RMDir "$INSTDIR\seed"
   RMDir "$INSTDIR"
   Call un.EndMaintenance
   ${If} $0 != "0"

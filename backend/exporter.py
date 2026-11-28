@@ -39,6 +39,8 @@ def event_cost_lines(event):
     lines = []
     if event.get('maintenance_fund_cents') is not None:
         lines.append(f"住宅维修基金金额：{yuan(event['maintenance_fund_cents'])}")
+    elif event.get('uses_maintenance_fund'):
+        lines.append('已动用住宅维修资金，金额未登记')
     if event['cost_cents'] or not event.get('cost_auto'):
         label = '历史登记费用' if event['parts'] or event['type'] == '配件更换' else '一般登记费用'
         lines.append(f"{label}：{yuan(event['cost_cents'])}")
@@ -285,11 +287,11 @@ def build_document(elevators, start, end, photos, directory):
         pairs = [("所属小区", COMMUNITY), ("当前状态", elevator["status"]),
                  ("楼栋", elevator["building_name"]), ("单元", elevator["unit_name"]),
                  ("电梯", elevator["name"]), ("内部编号", elevator["internal_number"]),
-                 ("设备编号", elevator["equipment_number"]), ("品牌", elevator["brand"]),
-                 ("型号", elevator["model"]), ("出厂日期", elevator["manufactured_on"]),
-                 ("投用日期", elevator["started_on"]), ("维保单位", elevator["maintenance_company"]),
-                 ("维保联系人", elevator["maintenance_contact"]), ("联系电话", elevator["maintenance_phone"]),
-                 ("下次维保", elevator["maintenance_due_on"]), ("下次年检", elevator["inspection_on"])]
+                 ("使用登记证号", elevator["equipment_number"]), ("品牌", elevator["brand"]),
+                 ("设备型号", elevator["model"]), ("出厂日期", elevator["manufactured_on"]),
+                 ("投入使用时间", elevator["started_on"]), ("维保单位", elevator["maintenance_company"]),
+                 ("维保人姓名", elevator["maintenance_contact"]), ("维保联系人电话", elevator["maintenance_phone"]),
+                 ("下次维保", elevator["maintenance_due_on"]), ("年检日期", elevator["inspection_on"])]
         add_table(document, ["项目", "内容", "项目", "内容"],
                   [(pairs[i][0], pairs[i][1], pairs[i+1][0], pairs[i+1][1]) for i in range(0, len(pairs), 2)], [2.6, 5.2, 2.6, 5.2])
         if elevator["notes"]:

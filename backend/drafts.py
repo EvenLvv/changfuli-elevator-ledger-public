@@ -55,10 +55,10 @@ def initial_blocks(source, photos=True):
     for elevator in source:
         label = export_elevator_label(elevator)
         add('heading', label)
-        for pairs in ((('internal_number', '内部编号'), ('equipment_number', '设备编号'), ('brand', '品牌'),
-                       ('model', '型号'), ('manufactured_on', '出厂日期'), ('started_on', '投用日期')),
-                      (('maintenance_company', '维保单位'), ('maintenance_contact', '维保联系人'),
-                       ('maintenance_phone', '联系电话'), ('inspection_on', '下次年检'), ('maintenance_due_on', '下次维保')),
+        for pairs in ((('internal_number', '内部编号'), ('equipment_number', '使用登记证号'), ('brand', '品牌'),
+                       ('model', '设备型号'), ('manufactured_on', '出厂日期'), ('started_on', '投入使用时间')),
+                      (('maintenance_company', '维保单位'), ('maintenance_contact', '维保人姓名'),
+                       ('maintenance_phone', '维保联系人电话'), ('inspection_on', '年检日期'), ('maintenance_due_on', '下次维保')),
                       (('status', '当前状态'), ('notes', '电梯档案备注'))):
             text = fields(elevator, pairs)
             if text:

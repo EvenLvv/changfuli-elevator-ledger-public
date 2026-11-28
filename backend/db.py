@@ -123,11 +123,16 @@ def init_db():
         """)
         # Old records have no reliable indication of manual versus calculated cost.
         # Preserve their recorded totals; new records retain the user's choice.
+        db.execute('BEGIN IMMEDIATE')
         if 'cost_auto' not in {row['name'] for row in db.execute('PRAGMA table_info(events)')}:
             db.execute('ALTER TABLE events ADD COLUMN cost_auto INTEGER NOT NULL DEFAULT 0')
         if 'maintenance_fund_cents' not in {row['name'] for row in db.execute('PRAGMA table_info(events)')}:
             db.execute('''ALTER TABLE events ADD COLUMN maintenance_fund_cents INTEGER
                 CHECK(maintenance_fund_cents BETWEEN 1 AND 10000000000)''')
+        if 'uses_maintenance_fund' not in {row['name'] for row in db.execute('PRAGMA table_info(events)')}:
+            db.execute("""ALTER TABLE events ADD COLUMN uses_maintenance_fund INTEGER NOT NULL
+                DEFAULT 0 CHECK(uses_maintenance_fund IN (0,1))""")
+            db.execute('UPDATE events SET uses_maintenance_fund=1 WHERE maintenance_fund_cents IS NOT NULL')
         if 'sort_order' not in {row['name'] for row in db.execute('PRAGMA table_info(attachments)')}:
             db.execute('ALTER TABLE attachments ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0')
         if 'version' not in {row['name'] for row in db.execute('PRAGMA table_info(elevators)')}:

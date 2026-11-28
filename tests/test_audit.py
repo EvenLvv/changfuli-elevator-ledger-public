@@ -53,13 +53,16 @@ class AcceptanceAudit(unittest.TestCase):
         legacy_record = self.client.get(f'/api/events/{legacy}').json()
         self.assertIsNone(legacy_record['maintenance_fund_cents'])
         self.assertEqual(legacy_record['parts'][0]['unit_price_cents'], 20000)
-        self.event(type='故障', notes='原表标注维修资金，金额未登记')
+        marked = self.event(type='故障', uses_maintenance_fund=True, maintenance_fund_yuan='')
+        record = self.client.get(f'/api/events/{marked}').json()
+        self.assertTrue(record['uses_maintenance_fund'])
+        self.assertIsNone(record['maintenance_fund_cents'])
+        self.assertIsNone(record['maintenance_fund_yuan'])
 
         parts = [{'name':'门锁','quantity':2}, {'name':'滚轮'}]
         payload = {'elevator_id':self.elevator, 'title':'更换门锁和滚轮', 'type':'维修',
                    'occurred_on':self.today, 'parts':parts}
         for changes in ({'uses_maintenance_fund':False, 'maintenance_fund_yuan':'10'},
-                        {'uses_maintenance_fund':True},
                         {'uses_maintenance_fund':True, 'maintenance_fund_yuan':'0'},
                         {'uses_maintenance_fund':True, 'maintenance_fund_yuan':'-0.01'},
                         {'uses_maintenance_fund':True, 'maintenance_fund_yuan':'1.001'},
@@ -69,6 +72,14 @@ class AcceptanceAudit(unittest.TestCase):
                 self.assertEqual(response.status_code, 400, response.text)
 
         event = self.post('/api/events', {**payload, 'uses_maintenance_fund':True, 'maintenance_fund_yuan':'325.15'})['id']
+        with connect() as db:
+            db.execute('ALTER TABLE events DROP COLUMN uses_maintenance_fund')
+        init_db()
+        init_db()
+        self.assertFalse(self.client.get(f'/api/events/{legacy}').json()['uses_maintenance_fund'])
+        # Recreate the unpriced marker after simulating an upgrade from the amount-only schema.
+        self.assertFalse(self.client.get(f'/api/events/{marked}').json()['uses_maintenance_fund'])
+        self.assertEqual(self.client.put(f'/api/events/{marked}', json={**record, 'uses_maintenance_fund':True}).status_code, 200)
         endpoint = f'/api/events/{event}'
         self.assertEqual(self.client.put(endpoint, json=payload).status_code, 200)
         record = self.client.get(endpoint).json()
@@ -86,13 +97,13 @@ class AcceptanceAudit(unittest.TestCase):
         draft_text = '\n'.join(block.get('text', '') for block in draft['blocks'])
         self.assertEqual(draft_text.count('住宅维修基金金额：325.15元'), 1)
         self.assertIn('历史登记费用：200.00元', draft_text)
-        self.assertIn('原表标注维修资金，金额未登记', draft_text)
+        self.assertIn('已动用住宅维修资金，金额未登记', draft_text)
         raw = self.client.get('/api/export', params=filters)
         self.assertEqual(raw.status_code, 200)
         word_text = '\n'.join(p.text for p in Document(io.BytesIO(raw.content)).paragraphs)
         self.assertIn('本周期住宅维修基金金额合计：325.15元', word_text)
         self.assertIn('本周期一般登记费用合计：200.00元', word_text)
-        self.assertIn('原表标注维修资金，金额未登记', word_text)
+        self.assertIn('已动用住宅维修资金，金额未登记', word_text)
 
         self.assertEqual(self.client.put(endpoint, json={**payload, 'uses_maintenance_fund':False}).status_code, 200)
         cleared = self.client.get(endpoint).json()

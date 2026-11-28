@@ -1,4 +1,5 @@
 """Isolated on-disk database and files for acceptance tests."""
+import os
 import tempfile
 from contextlib import contextmanager, ExitStack
 from pathlib import Path
@@ -19,6 +20,8 @@ def isolated_app():
         paths['DB'] = paths['DATA'] / 'elevator.db'
         for module in (db, main, backup, exporter):
             stack.enter_context(patch.multiple(module, **{k: v for k, v in paths.items() if hasattr(module, k)}))
+        stack.enter_context(patch.object(main, 'ROOT', root))
+        stack.enter_context(patch.dict(os.environ, ELEVATOR_SEED_LEDGER=''))
         db.init_db()
         with TestClient(main.app, client=('127.0.0.1', 50000)) as client:
             yield client, paths

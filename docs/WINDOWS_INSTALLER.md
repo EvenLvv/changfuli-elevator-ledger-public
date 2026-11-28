@@ -39,7 +39,7 @@
 构建机需要 Python（含 pip）和 NSIS 3。以下命令在项目根目录执行；只使用指定 ZIP、现有锁定依赖和本地 wheelhouse，不会从网络下载运行依赖。
 
 ```text
-python3 scripts/build_windows_installer.py --python-zip outputs/windows-installer-20261029/downloads/python-3.12.10-embed-amd64.zip --output-dir outputs/windows-installer-20261029/build --version 1.0.0
+python3 scripts/build_windows_installer.py --python-zip outputs/windows-installer-20261029/downloads/python-3.12.10-embed-amd64.zip --output-dir outputs/windows-installer-20261029/build --version 1.1.0
 ```
 
 如果 `makensis` 不在 PATH，增加 `--makensis /opt/homebrew/bin/makensis`（macOS 示例）或 Windows 上 `makensis.exe` 的实际路径。只准备独立运行目录可增加 `--stage-only`；这用于维护验收，不是另外交付一份便携安装流程。
@@ -51,3 +51,9 @@ python3 scripts/build_windows_installer.py --python-zip outputs/windows-installe
 `runtime/python312._pth` 显式列出 `python312.zip`、`.`、`Lib/site-packages`、`..` 并启用 `import site`。启动、停止和自检都调用安装包自身的 Python，不读取用户安装的 Python。
 
 源码构建成功、EXE 生成或 macOS 检查不等于 Windows 现场验收。发布前应在实际 Windows 环境验证首次安装、普通用户启动、跨用户同一套数据、带运行实例升级、安全停止失败阻断、卸载保留数据和局域网访问，并记录实际测试系统与边界。
+
+## 可选的首次建账
+
+默认构建只随附程序。制作内部安装包时，在上面的构建命令追加 `--seed-ledger /绝对路径/official-ledger.xlsx`。构建脚本会把指定文件复制到 `stage/seed/official-ledger.xlsx` 并计入构建清单。请将带表格的 stage 和安装包保留在内部交付位置。升级会替换程序目录中的随包副本，请单独保存原表。
+
+首次建立管理员或管理员登录时，系统只在电梯表为空且尚无导入成功标记时尝试建账。依次查找环境变量 `ELEVATOR_SEED_LEDGER` 指定的绝对路径、程序目录下的 `seed/official-ledger.xlsx`、数据目录下的 `seed/official-ledger.xlsx`，采用第一个存在的文件。缺少文件时正常启动。结果见日志目录的 `seed-import-report.json`，其中列出新增、跳过、重复编号及待核对位置。失败时本次导入整体回滚，修正后可再次登录重试。成功后系统保存 `official_ledger_imported` 标记，后续补录请使用“导入档案”。

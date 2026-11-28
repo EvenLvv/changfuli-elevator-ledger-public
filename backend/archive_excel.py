@@ -7,6 +7,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.worksheet.datavalidation import DataValidation
 from .db import COMMUNITY
+from .official_ledger import read_official_workbook
 
 COLUMNS = [('building_name','楼栋'),('unit_name','单元'),('name','电梯名称'),
            ('internal_number','内部编号'),('equipment_number','设备编号'),('brand','品牌'),('model','型号'),
@@ -68,7 +69,7 @@ def read_records(raw):
         raise ValueError('无法读取表格，请使用下载的.xlsx模板') from exc
     try:
         if '电梯档案' not in workbook.sheetnames:
-            raise ValueError('缺少“电梯档案”工作表，请使用下载的模板')
+            return read_official_workbook(workbook)
         sheet = workbook['电梯档案']
         sheet.reset_dimensions()
         iterator = sheet.iter_rows(max_col=len(COLUMNS)+1)

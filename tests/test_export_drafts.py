@@ -53,6 +53,57 @@ class ExportDraftTest(unittest.TestCase):
     def prepare(self, draft, **options):
         return self.post(f"/api/export-drafts/{draft['id']}/prepare", {'revision': draft['revision'], **options})
 
+    def test_library_orders_work_records_then_photos_and_filters_by_place(self):
+        other_lift = self.post('/api/elevators', {'building_name': '18栋', 'unit_name': '1单元', 'name': '2号梯'})['id']
+        first = self.event(occurred_on='2025-01-08')
+        older = self.event(occurred_on='2025-01-06')
+        latest = self.event(elevator_id=other_lift, occurred_on='2025-01-08')
+        self.photo(latest, 'green')
+        self.photo(older, 'blue')
+        a, _ = self.photo(first, 'red')
+        b, _ = self.photo(first, 'yellow')
+        self.assertEqual(self.client.put(f'/api/events/{first}/attachment-order', json={'ids':[b,a]}).status_code, 200)
+        result = self.client.get('/api/photo-library').json()
+        self.assertEqual([r['id'] for r in result['records']], [latest, first, older])
+        self.assertEqual([p['id'] for p in result['records'][1]['photos']], [b,a])
+        self.assertEqual([r['id'] for r in self.client.get('/api/photo-library/records').json()], [latest, first, older])
+        by_lift = self.client.get('/api/photo-library', params={'elevator_id':self.lift}).json()
+        self.assertEqual([r['id'] for r in by_lift['records']], [first, older])
+        selected = self.client.get('/api/photo-library', params={'event_id': first}).json()
+        self.assertEqual([r['id'] for r in selected['records']], [first])
+        self.assertFalse(selected['has_more'])
+
+    def test_local_images_between_paragraphs_survive_reopen_and_export(self):
+        draft = self.draft()
+        blocks = [{'id':'start', 'type':'paragraph', 'text':'插图前正文'}]
+        uploads = []
+        photo_ids = []
+        for fmt, suffix in [('JPEG','jpg'), ('PNG','png'), ('WEBP','webp')]:
+            stream = io.BytesIO()
+            Image.new('RGB', (80, 40), 'blue').save(stream, format=fmt)
+            photo_id = 'upload-' + suffix
+            photo_ids.append(photo_id)
+            blocks.append({'id':suffix,'type':'image','attachment_id':photo_id,'caption':suffix})
+            uploads.append(('photos', (f'合成图片.{suffix}', stream.getvalue())))
+        blocks.append({'id':'end','type':'paragraph','text':'插图后正文'})
+        payload = dict(title=draft['title'], revision=draft['revision'], blocks=blocks, photo_ids=photo_ids)
+        path = f"/api/export-drafts/{draft['id']}"
+        saved = self.client.post(path + '/save-with-photos', files=[
+            ('payload', ('draft.json', json.dumps(payload), 'application/json')), *uploads])
+        self.assertEqual(saved.status_code, 200, saved.text)
+        reopened = self.client.get(path).json()
+        self.assertEqual(reopened['blocks'], blocks)
+        for photo in reopened['images']:
+            self.assertTrue(photo['available'])
+            self.assertEqual(self.client.get(photo['url']).status_code, 200)
+        result = self.prepare(reopened)
+        document = Document(io.BytesIO(self.client.get(result['download']).content))
+        self.assertEqual(len(document.inline_shapes), 3)
+        paragraphs = [p.text for p in document.paragraphs]
+        self.assertLess(paragraphs.index('插图前正文'), paragraphs.index('图1  jpg'))
+        self.assertLess(paragraphs.index('图3  webp'), paragraphs.index('插图后正文'))
+        self.assertEqual(self.client.get('/api/photo-library').json()['records'], [])
+
     def test_default_natural_paragraphs_metadata_filters_and_all_source_fields(self):
         empty = self.draft(directory=False, package=True)
         self.assertLessEqual(len(empty['blocks']), 6)
