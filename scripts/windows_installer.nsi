@@ -199,7 +199,21 @@ Function ${PREFIX}CheckInstDirSafe
     Push "所选安装路径是文件而非文件夹，请重新选择普通文件夹。"
     Return
   ${EndIf}
-  Push "ok"
+  System::Call 'shlwapi::PathIsDirectoryEmptyW(w "$INSTDIR") i.r0'
+  ${If} $0 != 0
+    Push "ok"
+    Return
+  ${EndIf}
+  ; 1.x also ships Uninstall.exe, a manifest and a launcher. Require the
+  ; registered 2.x location and its desktop icon before removing program files.
+  ReadRegStr $0 HKLM "${UNINSTALL_KEY}" "InstallLocation"
+  ${If} $0 == "$INSTDIR"
+  ${AndIf} ${FileExists} "$INSTDIR\${ICON_FILE}"
+  ${AndIf} ${FileExists} "$INSTDIR\Uninstall.exe"
+    Push "ok"
+    Return
+  ${EndIf}
+  Push "无法确认所选文件夹是本产品的 2.x 安装目录。请选择空的专用文件夹，或选择原有的 2.x 安装目录进行升级。"
 FunctionEnd
 
 Function ${PREFIX}ValidateInstDir

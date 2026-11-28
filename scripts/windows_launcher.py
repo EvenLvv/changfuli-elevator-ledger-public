@@ -152,15 +152,8 @@ def _copy_legacy_tree(source_dir, target_dir, data_root, *, skip_names=()):
     stack = [source_dir]
     while stack:
         current = stack.pop()
-        try:
-            entries = sorted(current.iterdir(), key=lambda p: p.name)
-        except OSError:
-            continue
-        for entry in entries:
-            try:
-                info = entry.lstat()
-            except OSError:
-                continue
+        for entry in sorted(current.iterdir(), key=lambda p: p.name):
+            info = entry.lstat()
             if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
                 continue
             relative = entry.relative_to(source_dir)
@@ -308,11 +301,16 @@ def migrate_legacy_data(data_root, program_data=None, *, local_app_data=None, ro
         )
         for folder in MIGRATED_FOLDERS[1:]:
             source_folder = chosen_root / folder
-            if _safe_legacy_entry(source_folder, directory=True):
-                target_folder = checked_data_path(data_root, folder, directory=True)
-                target_folder.mkdir(parents=True, exist_ok=True)
-                copied_files += _copy_legacy_tree(source_folder, target_folder, data_root)
-                copied_folders.append(folder)
+            try:
+                info = source_folder.lstat()
+            except FileNotFoundError:
+                continue
+            if _is_reparse_or_wrong_type(info, directory=True):
+                continue
+            target_folder = checked_data_path(data_root, folder, directory=True)
+            target_folder.mkdir(parents=True, exist_ok=True)
+            copied_files += _copy_legacy_tree(source_folder, target_folder, data_root)
+            copied_folders.append(folder)
 
         checked_data_path(data_root, 'data/elevator.db')
         if new_db.exists():

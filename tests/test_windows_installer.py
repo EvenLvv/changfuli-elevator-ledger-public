@@ -302,6 +302,30 @@ class WindowsInstallerTest(unittest.TestCase):
         self.assertNotIn('CreateDirectory "$APPDATA', text)
         self.assertNotIn('elevator.db', text)
 
+    def test_nonempty_install_directory_requires_registered_desktop_installation(self):
+        text = (ROOT / 'scripts/windows_installer.nsi').read_text(encoding='utf-8')
+        guard = text.split('Function ${PREFIX}CheckInstDirSafe\n', 1)[1].split('FunctionEnd', 1)[0]
+        missing, existing = guard.split('IntOp $1 $0 & 0x400', 1)
+        self.assertIn('${If} $1 == 2\n    ${OrIf} $1 == 3\n      Push "ok"', missing)
+        ordinary_dir, ownership = existing.split('shlwapi::PathIsDirectoryEmptyW', 1)
+        self.assertIn('IntOp $1 $0 & 0x10', ordinary_dir)
+        self.assertNotIn('Push "ok"', ordinary_dir)
+        empty, registered = ownership.split('ReadRegStr $0 HKLM "${UNINSTALL_KEY}" "InstallLocation"', 1)
+        self.assertIn('${If} $0 != 0\n    Push "ok"\n    Return', empty)
+        self.assertIn(
+            '${If} $0 == "$INSTDIR"\n'
+            '  ${AndIf} ${FileExists} "$INSTDIR\\${ICON_FILE}"\n'
+            '  ${AndIf} ${FileExists} "$INSTDIR\\Uninstall.exe"\n'
+            '    Push "ok"\n    Return', registered)
+        self.assertIn('请选择空的专用文件夹', registered.split('${EndIf}', 1)[1])
+
+        install = text.split('Section "安装主程序" SEC_MAIN', 1)[1].split('SectionEnd', 1)[0]
+        self.assertLess(install.index('Call ValidateInstDir'), install.index('!insertmacro RemoveProgramFiles'))
+        validate = text.split('Function ${PREFIX}ValidateInstDir\n', 1)[1].split('FunctionEnd', 1)[0]
+        self.assertIn('Call ${PREFIX}CheckInstDirSafe', validate)
+        self.assertIn('${If} $0 != "ok"', validate)
+        self.assertIn('Abort', validate)
+
     def test_maintenance_marker_uses_a_validated_handle_without_truncation(self):
         text = (ROOT / 'scripts/windows_installer.nsi').read_text(encoding='utf-8')
         maintenance = text.split('!macro MaintenanceFunctions PREFIX', 1)[1].split('!macroend', 1)[0]

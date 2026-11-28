@@ -369,6 +369,45 @@ async def app(scope, receive, send):
         self.assertEqual(destination.stat().st_mtime_ns, original_mtime)
         self.assertEqual(destination.read_bytes(), source.read_bytes())
 
+    def test_legacy_attachment_read_failure_leaves_database_uninstalled_until_retry(self):
+        program_data = self.root / 'ProgramData'
+        os.environ['LOCALAPPDATA'] = str(self.root / 'LocalAppData')
+        os.environ['APPDATA'] = str(self.root / 'Roaming')
+        legacy = program_data / launcher.LEGACY_APP_ID
+        photos = legacy / 'storage/photos'
+        photos.mkdir(parents=True)
+        photo = photos / 'photo.png'
+        photo.write_bytes(b'legacy photo')
+        source_db = legacy / 'data/elevator.db'
+        source_db.parent.mkdir()
+        with closing(sqlite3.connect(source_db)) as conn:
+            conn.execute('CREATE TABLE elevators (id INTEGER PRIMARY KEY)')
+            conn.execute('INSERT INTO elevators VALUES (27)')
+            conn.commit()
+
+        original_db = source_db.read_bytes()
+        destination_db = self.data / 'data/elevator.db'
+        for method, blocked in [('iterdir', photos), ('lstat', photo), ('lstat', legacy / 'storage')]:
+            with self.subTest(method=method, blocked=blocked):
+                original = getattr(Path, method)
+
+                def deny_read(path):
+                    if path == blocked:
+                        raise PermissionError(str(path))
+                    return original(path)
+
+                with patch.object(Path, method, deny_read), self.assertLogs(level='WARNING'):
+                    self.assertFalse(launcher.migrate_legacy_data(self.data, program_data))
+                self.assertFalse(destination_db.exists())
+                self.assertFalse((self.data / launcher.MIGRATION_FILE).exists())
+
+        self.assertTrue(launcher.migrate_legacy_data(self.data, program_data))
+        with closing(sqlite3.connect(destination_db)) as conn:
+            self.assertEqual(conn.execute('SELECT id FROM elevators').fetchall(), [(27,)])
+        self.assertEqual((self.data / 'storage/photos/photo.png').read_bytes(), b'legacy photo')
+        self.assertEqual(source_db.read_bytes(), original_db)
+        self.assertEqual(photo.read_bytes(), b'legacy photo')
+
     def test_legacy_v1_data_migration_copies_when_empty_preserves_old_and_never_overwrites(self):
         legacy_program_data = self.root / 'ProgramData'
         legacy_root = legacy_program_data / 'ChangfuliElevatorLedger'
