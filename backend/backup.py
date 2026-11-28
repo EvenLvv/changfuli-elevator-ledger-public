@@ -4,7 +4,7 @@ import threading
 import zipfile
 from datetime import datetime
 
-from .db import BACKUPS, COMMUNITY, DB, STORAGE, now
+from .db import BACKUPS, COMMUNITY, DB, STORAGE, SHANGHAI, now
 from .drafts import DRAFT_PHOTO_FOLDER, draft_photo_path
 
 # ponytail: serialize backups on this single-server deployment to keep retention predictable.
@@ -13,7 +13,7 @@ _backup_lock = threading.Lock()
 
 def create_backup():
     with _backup_lock:
-        timestamp = datetime.now().strftime('%Y-%m-%d_%H%M%S_%f')
+        timestamp = datetime.now(SHANGHAI).strftime('%Y-%m-%d_%H%M%S_%f')
         target = BACKUPS / f'backup_{timestamp}.zip'
         partial = target.with_suffix('.partial')
         snapshot = BACKUPS / f'snapshot_{timestamp}.db'
@@ -56,7 +56,7 @@ def create_backup():
                     archive.write(path, 'storage/' + relative)
                 archive.writestr('backup_info.json', json.dumps({'created_at': now(), 'format': 1,
                     'community': COMMUNITY, 'settings': '数据库 system_settings 表',
-                    'sessions': '恢复后需重新登录'}, ensure_ascii=False))
+                    'access': '恢复后可直接打开台账'}, ensure_ascii=False))
             partial.replace(target)
         finally:
             snapshot.unlink(missing_ok=True)

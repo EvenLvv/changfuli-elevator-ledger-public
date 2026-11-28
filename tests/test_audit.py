@@ -13,8 +13,6 @@ class AcceptanceAudit(unittest.TestCase):
         self.context = isolated_app()
         self.client, self.paths = self.context.__enter__()
         self.addCleanup(self.context.__exit__, None, None, None)
-        self.post('/api/setup', {'username':'admin','display_name':'管理员','password':'audit-password-123'})
-        self.post('/api/login', {'username':'admin','password':'audit-password-123'})
         self.building = self.post('/api/buildings', {'name':'18栋'})['id']
         self.unit = self.post('/api/units', {'building_id':self.building,'name':'1单元'})['id']
         self.elevator = self.post('/api/elevators', {'unit_id':self.unit,'name':'1号梯'})['id']
@@ -188,7 +186,7 @@ class AcceptanceAudit(unittest.TestCase):
                 with connect() as db:
                     db.execute(f'UPDATE {table} SET deleted_at=NULL WHERE id=?', (record_id,))
                 self.assertEqual(response.status_code, 409, response.text)
-                self.assertEqual(response.json()['detail'], f'{name}已删除，请先在系统管理中恢复')
+                self.assertEqual(response.json()['detail'], f'{name}已删除，请先在系统设置中恢复')
                 self.assertEqual(self.client.get(path).json(), record)
                 self.assertEqual(self.client.get('/api/audit').json(), audit)
 
@@ -408,7 +406,7 @@ class AcceptanceAudit(unittest.TestCase):
             self.assertFalse(result.json()['valid'])
             self.assertFalse(any(b['name']=='不能留下的楼栋' for b in self.client.get('/api/buildings').json()))
 
-    def test_excel_template_format_and_permissions(self):
+    def test_excel_template_and_invalid_files(self):
         from openpyxl import load_workbook
         result=self.client.get('/api/elevator-archives/export?template=true')
         book=load_workbook(io.BytesIO(result.content))
@@ -419,10 +417,6 @@ class AcceptanceAudit(unittest.TestCase):
         self.assertEqual(response.status_code,400)
         self.assertIn('公式',response.json()['detail'])
         self.assertEqual(self.client.post('/api/elevator-archives/import',files={'file':('坏.xlsx',b'bad')}).status_code,400)
-        self.post('/api/users',{'username':'import-staff','display_name':'工作人员','password':'test-password-123','role':'staff'})
-        self.post('/api/logout',{})
-        self.post('/api/login',{'username':'import-staff','password':'test-password-123'})
-        self.assertEqual(self.client.post('/api/elevator-archives/import',files={'file':('表.xlsx',result.content)}).status_code,403)
         self.assertEqual(self.client.get('/api/elevator-archives/export').status_code,200)
 
     def test_webp_export_and_original_bytes(self):
@@ -565,20 +559,15 @@ class AcceptanceAudit(unittest.TestCase):
         self.assertEqual(self.client.put(f'/api/events/{event}',json={**first,'title':'过期修改'}).status_code,409)
         self.assertEqual(self.client.get(f'/api/events/{event}').json()['title'],'新修改')
 
-    def test_restore_and_attachment_permissions(self):
+    def test_restore_and_shared_attachments(self):
         from fastapi.testclient import TestClient
         from backend.main import app
         event=self.event()
         raw=io.BytesIO();Image.new('RGB',(20,10),'green').save(raw,format='PNG')
         photo=self.client.post(f'/api/events/{event}/attachments',files={'file':('现场.png',raw.getvalue(),'image/png')}).json()['id']
-        staff=self.post('/api/users',{'username':'staff','display_name':'工作人员','role':'staff','password':'staff-password-123'})['id']
         other=TestClient(app)
-        self.assertEqual(other.post('/api/login',json={'username':'staff','password':'staff-password-123'}).status_code,200)
-        self.assertEqual(other.post(f'/api/events/{event}/attachments',files={'file':('现场.png',raw.getvalue(),'image/png')}).status_code,403)
-        self.assertEqual(other.get('/api/trash').status_code,403)
-        self.client.put(f'/api/users/{staff}',json={'active':False})
-        self.client.put(f'/api/users/{staff}',json={'active':True})
-        self.assertEqual(other.get('/api/me').status_code,401)
+        self.assertEqual(other.post(f'/api/events/{event}/attachments',files={'file':('现场.png',raw.getvalue(),'image/png')}).status_code,200)
+        self.assertEqual(other.get('/api/trash').status_code,200)
         self.assertEqual(self.client.delete(f'/api/events/{event}').status_code,200)
         self.assertEqual(self.client.get('/api/attachments/'+photo).status_code,404)
         self.assertEqual(self.client.post(f'/api/trash/events/{event}/restore').status_code,200)
@@ -649,12 +638,11 @@ class AcceptanceAudit(unittest.TestCase):
         code="""from backend.main import app
 from fastapi.testclient import TestClient
 with TestClient(app) as c:
- r=c.post('/api/login',json={'username':'admin','password':'audit-password-123'})
- assert r.status_code==200,r.text
+ assert not c.cookies
  records=c.get('/api/events').json()
  assert len(records)==1,records
  assert records[0]['title']=='重启后应保留的记录',records
- print('restart and restored login passed')
+ print('restored records available on restart')
 """
         result=subprocess.run([sys.executable,'-c',code],env=environment,capture_output=True,text=True,timeout=20)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)

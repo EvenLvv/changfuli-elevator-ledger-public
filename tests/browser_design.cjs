@@ -1,4 +1,4 @@
-// Requires the same isolated server and credentials as browser_audit.cjs.
+// Requires the same isolated server as browser_audit.cjs.
 const {chromium,request}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
@@ -11,8 +11,8 @@ assert.ok(['127.0.0.1','[::1]','localhost'].includes(endpoint.hostname)&&endpoin
  fs.mkdirSync(out,{recursive:true});
  const api=await request.newContext({baseURL:base});
  assert.equal((await api.get('/api/health')).status(),200,'Isolated loopback server must be healthy');
- const credentials={username:'audit',password:'audit-password-123'};
- assert.equal((await api.post('/api/login',{data:credentials})).status(),200);
+
+
  const day=new Date().toISOString().slice(0,10);
  const shift=n=>new Date(Date.now()+n*86400000).toISOString().slice(0,10);
  async function post(path,data){const r=await api.post(path,{data});assert.equal(r.status(),200,await r.text());return r.json()}
@@ -32,18 +32,19 @@ assert.ok(['127.0.0.1','[::1]','localhost'].includes(endpoint.hostname)&&endpoin
  const lan='http://192.168.1.20:8766';
  const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});
  try{
-  const context=await browser.newContext({viewport:{width:1500,height:1060},storageState:await api.storageState()});
+  const context=await browser.newContext({viewport:{width:1500,height:1060}});
   await context.addInitScript(()=>{for(const name of ['toSorted','toReversed','toSpliced'])delete Array.prototype[name];delete Object.groupBy;delete Promise.withResolvers;});
   const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
   const requestedPaths=[];page.on('request',request=>requestedPaths.push(new URL(request.url()).pathname));
   await page.goto(base+'/admin');await page.getByLabel('局域网访问地址',{exact:true}).fill(lan);
   const saveResponse=page.waitForResponse(r=>r.url().endsWith('/api/network')&&r.request().method()==='PUT');await page.getByRole('button',{name:'保存访问地址',exact:true}).click();assert.equal((await saveResponse).status(),200);await page.getByText('已保存',{exact:true}).waitFor();
   assert.equal((await (await api.get('/api/network')).json()).configured_url,lan);
-  const screens=[['home','/','.home-hero'],['archives','/elevators','.elevator-grid'],['detail','/elevators/'+lift.id,'.timeline-item'],['new-record','/events/new?elevator_id='+lift.id,'.form-panel'],['records','/records','.records-layout'],['reminders','/reminders','.list-row'],['export','/export','.archive-select-layout'],['search','/search?q=18栋%20门锁','.search-summary'],['search-empty','/search','.search-intro'],['admin','/admin','.network-settings form']];
+  const screens=[['home','/','.home-hero'],['archives','/elevators','.elevator-grid'],['detail','/elevators/'+lift.id,'.timeline-item'],['new-record','/events/new?elevator_id='+lift.id,'.form-panel'],['records','/records','.operation-workspace'],['reminders','/reminders','.list-row'],['export','/export','.archive-select-layout'],['search','/search?q=18栋%20门锁','.search-summary'],['search-empty','/search','.search-intro'],['admin','/admin','.network-settings form']];
   for(const [name,path,ready] of screens){
    requestedPaths.length=0;
    await page.setViewportSize({width:1500,height:1060});await page.goto(base+path);await page.locator(ready).first().waitFor();await page.waitForFunction(()=>!document.querySelector('.el-button.is-loading'));await page.evaluate(async()=>{await Promise.all([...document.images].filter(i=>i.offsetParent!==null).map(i=>i.decode()))});await page.screenshot({path:out+'/'+name+'-desktop.png',fullPage:true});
    for(const width of [390,320]){await page.setViewportSize({width,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),name+' overflow at '+width);if(width===390)await page.screenshot({path:out+'/'+name+'-mobile.png',fullPage:true})}
+   assert.ok(!requestedPaths.some(path=>['/api/me','/api/login','/api/setup/status','/api/users'].includes(path)));
    if(name==='search'||name==='search-empty') assert.ok(!requestedPaths.includes('/api/elevators'),name+' requested the full ledger');
   }
   await page.setViewportSize({width:390,height:844});await page.getByRole('button',{name:'菜单 ☰',exact:true}).click();await page.getByRole('navigation',{name:'主菜单'}).getByRole('button',{name:'电梯档案',exact:true}).click();await page.waitForURL('**/elevators');assert.equal(await page.locator('.main-nav').isVisible(),false);
@@ -111,13 +112,54 @@ assert.ok(['127.0.0.1','[::1]','localhost'].includes(endpoint.hostname)&&endpoin
 
   await page.setViewportSize({width:1500,height:1060});
   await page.goto(base+'/records');
-  await page.locator('.work-row').first().waitFor();
+  await page.locator('button.operation-card').first().waitFor();
+  // The device clock is still in March in UTC, but Shanghai has entered April and Q2.
+  await page.clock.setFixedTime(new Date('2026-03-31T16:05:00Z'));
+  for (const [label,start,end] of [
+   ['今天','2026-04-01','2026-04-01'], ['近7天','2026-03-26','2026-04-01'],
+   ['本月','2026-04-01','2026-04-30'], ['本季度','2026-04-01','2026-06-30']
+  ]) {
+   const query=recordsRequest();
+   await page.getByRole('button',{name:label,exact:true}).click();
+   const params=new URL((await query).url()).searchParams;
+   assert.equal(params.get('start'),start);
+   assert.equal(params.get('end'),end);
+   assert.equal(params.get('month'),'2026-04-01');
+   assert.equal(await page.getByRole('button',{name:label,exact:true}).getAttribute('aria-pressed'),'true');
+  }
+  await page.getByRole('button',{name:'上个月'}).click();
+  await page.getByRole('heading',{name:'2026年3月',exact:true}).waitFor();
+  const oneDay=recordsRequest();
+  await page.getByRole('button',{name:/^2026年3月28日/}).click();
+  const singleParams=new URL((await oneDay).url()).searchParams;
+  assert.equal(singleParams.get('start'),'2026-03-28');assert.equal(singleParams.get('end'),'2026-03-28');
+  await page.getByRole('button',{name:'下个月'}).click();
+  await page.getByRole('heading',{name:'2026年4月',exact:true}).waitFor();
+  await page.clock.setFixedTime(new Date());
+  await page.getByRole('button',{name:'今天',exact:true}).click();
+  await page.locator('.days button.today .pin').waitFor();
+  const stamp=persisted.created_at;
+  const expectedDay=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'long',day:'numeric',weekday:'long'}).format(new Date(stamp));
+  assert.equal((await page.locator('.date-rule').first().innerText()).replace(/\s/g,''),expectedDay.replace(/\s/g,''));
+  const typeFilter=page.getByRole('combobox',{name:'类型',exact:true});
+  const filtered=page.waitForResponse(r=>new URL(r.url()).searchParams.get('type')==='系统设置');
+  await typeFilter.selectOption('系统设置');
+  const systemEntries=await (await filtered).json();
+  assert.ok(systemEntries.total>0);
+  await page.locator('.range-note').filter({hasText:'共 '+systemEntries.total+' 条操作'}).waitFor();
+  assert.equal(await page.locator('.operation.sys').count(),systemEntries.total);
+  await typeFilter.selectOption('');
+  await page.getByRole('button',{name:/键盘选择电梯验收/}).first().click();
+  await page.waitForURL('**/elevators/'+tenthEntrance.id+'?event_id='+persisted.id);
+  await page.goto(base+'/records');
   const recordsSelect=page.getByRole('combobox',{name:'电梯',exact:true});
   const recordsTrigger=page.locator('.el-select').filter({has:recordsSelect});
   const recordsOption=page.getByRole('option',{name:tenthLabel,exact:true});
   await recordsSelect.click();
   await recordsSelect.fill(firstBuilding+'栋 10单元 1号梯');
+  const narrowed=recordsRequest();
   await recordsOption.click();
+  assert.equal(new URL((await narrowed).url()).searchParams.get('elevator_id'),String(tenthEntrance.id));
   await recordsTrigger.getByText(tenthLabel,{exact:true}).waitFor();
   await recordsSelect.click();
   await recordsSelect.fill('不存在');await recordsOption.waitFor({state:'hidden'});
@@ -130,12 +172,10 @@ assert.ok(['127.0.0.1','[::1]','localhost'].includes(endpoint.hostname)&&endpoin
   await page.getByRole('heading',{name:'工作记录',exact:true}).click();
   function recordsRequest(){return page.waitForRequest(request=>{
    const url=new URL(request.url());
-   return url.pathname==='/api/events'&&url.searchParams.get('offset')==='0';
+   return url.pathname==='/api/timeline';
   })}
-  const narrowed=recordsRequest();await page.getByRole('button',{name:'查询记录'}).click();
-  assert.equal(new URL((await narrowed).url()).searchParams.get('elevator_id'),String(tenthEntrance.id));
+  const cleared=recordsRequest();
   await recordsTrigger.hover();await recordsTrigger.locator('.el-select__clear').click();
-  const cleared=recordsRequest();await page.getByRole('button',{name:'查询记录'}).click();
   assert.equal(new URL((await cleared).url()).searchParams.has('elevator_id'),false);
 
   // Current APIs prevent new aliases. Reproduce the old ledger response while keeping both saved IDs real.
@@ -164,7 +204,7 @@ assert.ok(['127.0.0.1','[::1]','localhost'].includes(endpoint.hostname)&&endpoin
   await page.getByRole('option',{name:legacyLabel(similarAlias),exact:true}).waitFor();
   await recordsSelect.fill(wordLabel);
   await page.getByRole('option',{name:legacyLabel(similarAlias),exact:true}).waitFor({state:'hidden'});
-  assert.deepEqual(await page.getByRole('option').allTextContents(),[legacyLabel(alias)]);
+  assert.deepEqual(await page.getByRole('listbox').getByRole('option').allTextContents(),[legacyLabel(alias)]);
   await page.goto(base+'/export');
   await page.getByText('某部电梯',{exact:true}).click();
   await page.locator('.el-select').filter({has:page.getByRole('combobox',{name:'楼栋',exact:true})}).click();
@@ -182,7 +222,7 @@ assert.ok(['127.0.0.1','[::1]','localhost'].includes(endpoint.hostname)&&endpoin
   await page.screenshot({path:out+'/legacy-elevator-options-mobile.png',animations:'disabled'});
   await liftSearch.fill(wordLabel);
   await page.getByRole('option',{name:legacyLabel(similarAlias),exact:true}).waitFor({state:'hidden'});
-  assert.deepEqual(await page.getByRole('option').allTextContents(),[legacyLabel(alias)]);
+  assert.deepEqual(await page.getByRole('listbox').getByRole('option').allTextContents(),[legacyLabel(alias)]);
   await liftSearch.press('Enter');
   await liftTrigger.getByText(legacyLabel(alias),{exact:true}).waitFor();
   await liftTrigger.click();
@@ -220,11 +260,13 @@ assert.ok(['127.0.0.1','[::1]','localhost'].includes(endpoint.hostname)&&endpoin
   await page.evaluate(()=>{window.print=()=>{window.__printed=true}});await page.getByRole('button',{name:'打印电梯标签',exact:true}).click();await page.waitForFunction(()=>window.__printed===true);await page.emulateMedia({media:'print'});assert.equal(await page.locator('.qr-print-sheet').isVisible(),true);assert.equal(await page.locator('.shell').isVisible(),false);await page.locator('.qr-print-sheet').screenshot({path:out+'/qr-label.png'});await page.pdf({path:out+'/qr-label.pdf',format:'A4',printBackground:true});await page.emulateMedia({media:'screen'});
   await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await page.screenshot({path:out+'/qr-mobile.png',fullPage:true});
   const scanned=await browser.newContext({viewport:{width:390,height:844}});const scan=await scanned.newPage();scan.on('pageerror',e=>errors.push(e.message));
-  await scan.goto(base+'/elevators/'+lift.id);await scan.getByText('登录后将直接打开扫码对应的电梯档案。').waitFor();await scan.screenshot({path:out+'/scan-login-mobile.png',fullPage:true});
-  await scan.getByLabel('账号',{exact:true}).fill(credentials.username);await scan.getByLabel('密码',{exact:true}).fill(credentials.password);await scan.getByRole('button',{name:'登录',exact:true}).click();await scan.getByRole('heading',{name:'18栋1口1号电梯',exact:true}).waitFor();assert.equal(scan.url(),base+'/elevators/'+lift.id);await scan.locator('.timeline-item').first().waitFor();await scan.screenshot({path:out+'/scan-detail-mobile.png',fullPage:true});
+  await scan.goto(base+'/elevators/'+lift.id);await scan.getByRole('heading',{name:'18栋1口1号电梯',exact:true}).waitFor();assert.equal(scan.url(),base+'/elevators/'+lift.id);await scan.locator('.timeline-item').first().waitFor();await scan.screenshot({path:out+'/scan-detail-mobile.png',fullPage:true});
   await scan.reload();await scan.getByRole('heading',{name:'18栋1口1号电梯',exact:true}).waitFor();
   await scan.goto(base+'/elevators/999999');await scan.getByText('找不到这部电梯',{exact:false}).first().waitFor();assert.equal(await scan.locator('.detail-heading').count(),0);
-  const signedOut=await browser.newContext({viewport:{width:1500,height:1060}});const login=await signedOut.newPage();await login.goto(base);await login.getByRole('button',{name:'登录',exact:true}).waitFor();await login.screenshot({path:out+'/login-desktop.png',fullPage:true});
-  assert.deepEqual(errors,[]);console.log('PASS: numeric location form, separate lift numbers per entrance, natural record selector order and dropdown search, distinct legacy labels with saved ID and QR filenames, 10 desktop pages, 390/320px overflow checks, mobile menu/dialog, persisted LAN setting, reject loopback, QR download and print-only label, fresh loopback login preserves elevator and reload, missing elevator, login design. LAN reachability not tested; loopback '+base+'; Chrome '+browser.version());
+  await scan.goto(base);await scan.locator('.home-hero h1').waitFor();
+  assert.equal(await scan.locator('.stat').count(),6);
+  assert.equal(await scan.locator('input[type=password],.user-avatar').count(),0);
+  assert.deepEqual(await scanned.cookies(),[]);
+  assert.deepEqual(errors,[]);console.log('PASS: numeric location form, separate lift numbers per entrance, natural record selector order and dropdown search, distinct legacy labels with saved ID and QR filenames, 10 desktop pages, 390/320px overflow checks, mobile menu/dialog, persisted LAN setting, reject loopback, QR download and print-only label, direct scan and reload, missing elevator, cookie-free home. LAN reachability not tested; loopback '+base+'; Chrome '+browser.version());
  }finally{await browser.close();await api.dispose()}
 })().catch(e=>{console.error(e);process.exit(1)});

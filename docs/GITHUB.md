@@ -1,6 +1,6 @@
 # GitHub 源码与自动审查
 
-仓库保存可继续开发的完整源码；离线运行包和 Windows EXE 单独交付。首次上传前核对 `.gitignore` 与实际待提交清单，当前仓库按用户要求公开。界面使用自行绘制的示意图，素材说明见 [DESIGN_ASSETS.md](DESIGN_ASSETS.md)。
+仓库保存可继续开发的完整源码；离线运行包和 Windows EXE 单独交付。首次上传前核对 `.gitignore` 与实际待提交清单，当前仓库按用户要求公开。首页配图随源码保存，素材说明见 [DESIGN_ASSETS.md](DESIGN_ASSETS.md)。
 
 ## 上传范围
 

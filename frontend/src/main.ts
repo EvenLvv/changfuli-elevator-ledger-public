@@ -11,4 +11,5 @@ const routes = [
   '/records', '/photos', '/search', '/reminders', '/export', '/admin'
 ].map(path => ({path, component: {render: () => null}}))
 const router = createRouter({history:createWebHistory(), routes})
-createApp(App).use(router).use(ElementPlus,{locale:zhCn}).mount('#app')
+const app = createApp(App).use(router).use(ElementPlus,{locale:zhCn})
+router.isReady().then(() => app.mount('#app'))

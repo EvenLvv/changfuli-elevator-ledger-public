@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { displayTimestamp, today } from '../calendar'
 import { place } from '../location'
 
 type Block = { id:string; type:'heading'|'paragraph'|'image'; text?:string; attachment_id?:string; caption?:string }
@@ -63,7 +64,7 @@ const previewDirectory = computed(() => {
 })
 const photoFor = (block:Block) => allPhotos.value.find(x=>x.id===block.attachment_id)
 const photoUsed = (id:string) => !!draft.value?.blocks.some(x=>x.type==='image'&&x.attachment_id===id)
-const savedTime = computed(() => draft.value?.updated_at?.replace('T',' ').slice(0,19)||'')
+const savedTime = computed(() => displayTimestamp(draft.value?.updated_at))
 const blockLabel = (block:Block) => block.type==='heading'?'小标题':block.type==='paragraph'?'正文':`图片 · 图${imageNumbers.value[block.id]}`
 
 async function confirmDiscard() {
@@ -94,8 +95,8 @@ async function loadDrafts() {
   finally {listLoading.value=false}
 }
 function periodRange(value:string) {
-  const d=new Date(),year=d.getFullYear(),month=String(d.getMonth()+1).padStart(2,'0'),day=String(d.getDate()).padStart(2,'0')
-  return {start:value==='year'?`${year}-01-01`:value==='month'?`${year}-${month}-01`:'',end:value==='all'?'':`${year}-${month}-${day}`}
+  const end=today()
+  return {start:value==='year'?end.slice(0,4)+'-01-01':value==='month'?end.slice(0,7)+'-01':'',end:value==='all'?'':end}
 }
 function period(value:string) {
   const range=periodRange(value)
@@ -247,7 +248,6 @@ function dropBlock(event:DragEvent,index:number) {
   draft.value.blocks.splice(to,0,block);announcement.value=`${blockLabel(block)}已移至第${to+1}段`;insertAt.value=null;finishDrag()
 }
 function beforeUnload(event:BeforeUnloadEvent) {if(dirty.value){event.preventDefault();event.returnValue=''}}
-defineExpose({confirmLeave:confirmDiscard})
 const removeGuard=router.beforeEach(async()=>await confirmDiscard())
 onMounted(()=>{loadDrafts();window.addEventListener('beforeunload',beforeUnload)})
 onBeforeUnmount(()=>{removeGuard();window.removeEventListener('beforeunload',beforeUnload);clearPendingPhotos()})
@@ -283,7 +283,7 @@ onBeforeUnmount(()=>{removeGuard();window.removeEventListener('beforeunload',bef
           <div class="archive-create-actions"><el-button type="primary" size="large" class="full" :loading="busy" :disabled="!exportCount" @click="generate">生成编排稿 →</el-button><p class="hint">{{scopeName}} · {{exportCount}} 部电梯。编排稿独立保存，修改稿件不改变工作台账。</p><el-button text :loading="busy" :disabled="!exportCount" @click="exportOriginal">直接导出原始档案</el-button><el-button text :loading="busy" :disabled="!exportCount" @click="lookupCosts">查看资金与费用汇总</el-button><div v-if="cost" class="cost-result"><div>{{cost.record_count}} 条记录</div><div>住宅维修基金金额 {{cost.maintenance_fund_cents ? `¥${(cost.maintenance_fund_cents/100).toFixed(2)}` : '无金额记录'}}</div><div>一般登记费用 ¥{{(cost.cost_cents/100).toFixed(2)}}</div></div></div>
         </el-form>
       </section>
-      <aside class="archive-draft-rail"><div class="panel-head"><h2>已保存的编排稿</h2><el-button text :loading="listLoading" @click="loadDrafts">刷新</el-button></div><p class="hint">继续整理以前的稿件，或在左侧生成一份新稿。</p><div v-if="listError" class="archive-list-error" role="alert">{{listError}}<el-button text @click="loadDrafts">重试</el-button></div><p v-else-if="!drafts.length&&!listLoading" class="archive-no-drafts">尚无编排稿</p><div v-else class="archive-draft-list"><button v-for="item in drafts" :key="item.id" type="button" :disabled="busy" @click="openDraft(item.id)"><b>{{item.title}}</b><span>{{item.updated_at?.replace('T',' ').slice(0,16)}}</span><small>{{item.created_by_name}} · 第 {{item.revision}} 版</small></button></div><div class="archive-selection-summary"><b>{{scopeName}}</b><span>{{filters.start||'最早记录'}} 至 {{filters.end||'最新记录'}}</span><small>编制单位：昌福里社区27区党群物业服务站</small></div><div class="archive-rail-note"><b>像整理一份纸质档案</b><p>正文、小标题、照片都可单独调整。生成后先编排，再预览，最后导出。</p></div></aside>
+      <aside class="archive-draft-rail"><div class="panel-head"><h2>已保存的编排稿</h2><el-button text :loading="listLoading" @click="loadDrafts">刷新</el-button></div><p class="hint">继续整理以前的稿件，或在左侧生成一份新稿。</p><div v-if="listError" class="archive-list-error" role="alert">{{listError}}<el-button text @click="loadDrafts">重试</el-button></div><p v-else-if="!drafts.length&&!listLoading" class="archive-no-drafts">尚无编排稿</p><div v-else class="archive-draft-list"><button v-for="item in drafts" :key="item.id" type="button" :disabled="busy" @click="openDraft(item.id)"><b>{{item.title}}</b><span>{{displayTimestamp(item.updated_at)}}</span><small>{{item.created_by_name}} · 第 {{item.revision}} 版</small></button></div><div class="archive-selection-summary"><b>{{scopeName}}</b><span>{{filters.start||'最早记录'}} 至 {{filters.end||'最新记录'}}</span><small>编制单位：昌福里社区27区党群物业服务站</small></div><div class="archive-rail-note"><b>像整理一份纸质档案</b><p>正文、小标题、照片都可单独调整。生成后先编排，再预览，最后导出。</p></div></aside>
     </div>
 
     <template v-else-if="draft">

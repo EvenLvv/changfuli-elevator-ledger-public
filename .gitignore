@@ -63,3 +63,5 @@ htmlcov/
 
 # Optional private first-run workbook
 /seed/*.xlsx
+
+/.fix-notes/

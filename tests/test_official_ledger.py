@@ -15,7 +15,6 @@ from support import isolated_app
 
 
 FIXTURE = Path(__file__).parent / 'fixtures/synthetic-ledger-fixture.xlsx'
-ADMIN = dict(username='synthetic-admin', display_name='测试管理员', password='synthetic-only-123')
 
 
 class OfficialLedgerTest(unittest.TestCase):
@@ -28,13 +27,6 @@ class OfficialLedgerTest(unittest.TestCase):
         response = self.client.post(path, json=data)
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
-
-    def login(self):
-        self.post('/api/login', ADMIN)
-
-    def setup_admin(self):
-        self.post('/api/setup', ADMIN)
-        self.login()
 
     def upload(self, *, token=None, raw=None):
         return self.client.post('/api/elevator-archives/import', params={'dry_run': token is None},
@@ -72,7 +64,6 @@ class OfficialLedgerTest(unittest.TestCase):
                 self.assertEqual(ledger.faults[1][2]['fault_at'], '2025-01-05T08:35:00')
 
     def test_two_sheet_preview_commit_and_reimport(self):
-        self.setup_admin()
         preview = self.upload().json()
         self.assertEqual(self.client.get('/api/elevators').json(), [])
         self.assertEqual(self.client.get('/api/events').json(), [])
@@ -122,7 +113,6 @@ class OfficialLedgerTest(unittest.TestCase):
         self.assertEqual(again['unmatched'], report['unmatched'])
 
     def test_existing_identities_real_time_and_stale_preview(self):
-        self.setup_admin()
         old = dict(building_name='41栋', unit_name='1口', name='1号梯', internal_number='410101',
                    maintenance_contact='测试人员', maintenance_phone='000000', brand='测试品牌',
                    maintenance_due_on='2026-12-01', status='待处理')
@@ -164,11 +154,17 @@ class OfficialLedgerTest(unittest.TestCase):
         for key, value in old.items():
             self.assertEqual(stored[key], value)
 
-    def test_setup_seed_once_and_private_summary(self):
+    def restart(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+        with TestClient(app) as client:
+            self.assertFalse(client.get('/api/setup/status').json()['needed'])
+
+    def test_first_launch_seeds_once_and_writes_private_summary(self):
         from backend.db import connect
-        report_path = self.paths['LOGS'] / 'seed-import-report.json'
-        with patch.dict(os.environ, ELEVATOR_SEED_LEDGER=str(FIXTURE.resolve())):
-            self.post('/api/setup', ADMIN)
+        with isolated_app(seed=FIXTURE.resolve()) as (client, paths):
+            report_path = paths['LOGS'] / 'seed-import-report.json'
+            self.assertEqual(len(client.get('/api/events').json()), 5)
             summary = json.loads(report_path.read_text(encoding='utf-8'))
             self.assertEqual((summary['added'], summary['events_added'], len(summary['unmatched'])), (9, 5, 1))
             self.assertIn('440201', summary['warnings'][0])
@@ -181,12 +177,11 @@ class OfficialLedgerTest(unittest.TestCase):
                 db.execute('DELETE FROM events')
                 db.execute('DELETE FROM elevators')
             with patch('backend.main.read_records', side_effect=AssertionError('unexpected second read')) as reader:
-                self.login()
+                self.restart()
                 reader.assert_not_called()
-            self.assertEqual(self.client.get('/api/elevators').json(), [])
+            self.assertEqual(client.get('/api/elevators').json(), [])
 
-    def test_late_seed_on_admin_login_retry_and_priority(self):
-        self.setup_admin()
+    def test_late_seed_restart_retry_and_priority(self):
         report_path = self.paths['LOGS'] / 'seed-import-report.json'
         self.assertFalse(report_path.exists())
         from backend import main
@@ -194,33 +189,42 @@ class OfficialLedgerTest(unittest.TestCase):
             seed = base / 'seed/official-ledger.xlsx'
             seed.parent.mkdir()
             shutil.copyfile(FIXTURE, seed)
-        self.post('/api/users', dict(username='synthetic-staff', display_name='测试员工',
-                                    password='synthetic-staff-pass', role='staff'))
-        self.post('/api/login', dict(username='synthetic-staff', password='synthetic-staff-pass'))
-        self.assertFalse(report_path.exists())
         # A failure after elevator insertion rolls back the entire attempt.
         with patch('backend.main.insert_event', side_effect=ValueError('测试中断')):
-            self.login()
+            self.restart()
         self.assertFalse(json.loads(report_path.read_text(encoding='utf-8'))['committed'])
         self.assertEqual(self.client.get('/api/elevators').json(), [])
         with patch.object(Path, 'open', autospec=True, side_effect=Path.open) as opened:
-            self.login()
+            self.restart()
             paths = [args[0] for args, _ in opened.call_args_list]
             self.assertIn(main.ROOT / 'seed/official-ledger.xlsx', paths)
             self.assertNotIn(main.DATA / 'seed/official-ledger.xlsx', paths)
         self.assertEqual(len(self.client.get('/api/elevators').json()), 9)
+        self.assertTrue(json.loads(report_path.read_text(encoding='utf-8'))['committed'])
 
     def test_data_dir_seed_and_nonempty_ledger_guard(self):
-        self.setup_admin()
         target = self.paths['DATA'] / 'seed/official-ledger.xlsx'
         target.parent.mkdir()
         shutil.copyfile(FIXTURE, target)
         self.post('/api/elevators', dict(building_name='41栋', unit_name='1单元', name='1号电梯'))
-        self.login()
+        self.restart()
         self.assertFalse((self.paths['LOGS'] / 'seed-import-report.json').exists())
         with isolated_app() as (client, paths):
             target = paths['DATA'] / 'seed/official-ledger.xlsx'
             target.parent.mkdir()
             shutil.copyfile(FIXTURE, target)
-            self.assertEqual(client.post('/api/setup', json=ADMIN).status_code, 200)
+            self.restart()
             self.assertEqual(json.loads((paths['LOGS'] / 'seed-import-report.json').read_text())['added'], 9)
+
+    def test_absolute_configured_seed_takes_precedence(self):
+        from backend import main
+        fallback = main.ROOT / 'seed/official-ledger.xlsx'
+        fallback.parent.mkdir()
+        shutil.copyfile(FIXTURE, fallback)
+        with patch.dict(os.environ, ELEVATOR_SEED_LEDGER=str(FIXTURE.resolve())), \
+                patch.object(Path, 'open', autospec=True, side_effect=Path.open) as opened:
+            self.restart()
+            files = [args[0] for args, _ in opened.call_args_list]
+            self.assertIn(FIXTURE.resolve(), files)
+            self.assertNotIn(fallback, files)
+        self.assertEqual(len(self.client.get('/api/elevators').json()), 9)

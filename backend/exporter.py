@@ -5,7 +5,7 @@ import re
 import uuid
 import zipfile
 from collections import Counter
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from docx import Document
@@ -17,7 +17,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from PIL import Image, ImageOps
 
-from .db import COMMUNITY, EXPORTS, STORAGE, connect, rows
+from .db import COMMUNITY, EXPORTS, STORAGE, SHANGHAI, connect, rows
 from .location import elevator_label, export_elevator_label
 
 # Word/WPS use the reader's fonts, independent of the server operating system.
@@ -273,7 +273,7 @@ def build_document(elevators, start, end, photos, directory):
     cover_line(document, period, after=30)
     cover_line(document, f"共 {len(elevators)} 部电梯，{len(all_events)} 条工作记录。", 14, after=50)
     cover_line(document, f"编制单位：{COMMUNITY}", 14)
-    cover_line(document, f"编制日期：{friendly_date(date.today().isoformat())}", 14)
+    cover_line(document, f"编制日期：{friendly_date(datetime.now(SHANGHAI).date().isoformat())}", 14)
     section = document.add_section(WD_SECTION_START.NEW_PAGE); add_page_numbers(document, section)
     add_heading(document, "编制说明")
     add_text(document, "本档案汇集所选范围和统计周期内的电梯基本资料、工作记录及相关附件，供工作检查、资料查阅和归档留存使用。")

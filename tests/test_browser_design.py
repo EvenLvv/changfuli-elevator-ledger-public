@@ -36,7 +36,6 @@ const source=fs.readFileSync('tests/browser_design.cjs','utf8');
 let launched=false, failure;
 const stop=new Error('Reached browser launch');
 const api={
-  post:async(path)=>{assert.equal(path,'/api/login');return {status:()=>200}},
   get:async(path)=>{
     if(path==='/api/health'){
       const response=await fetch(process.env.AUDIT_URL+path);

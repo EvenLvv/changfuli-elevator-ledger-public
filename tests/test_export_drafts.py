@@ -1,4 +1,4 @@
-"""Editable archives: isolated source snapshots, ordering, permissions, and recovery."""
+"""Editable archives: isolated source snapshots, ordering, shared editing, and recovery."""
 import csv
 import io
 import json
@@ -21,8 +21,6 @@ class ExportDraftTest(unittest.TestCase):
         self.context = isolated_app()
         self.client, self.paths = self.context.__enter__()
         self.addCleanup(self.context.__exit__, None, None, None)
-        self.post('/api/setup', {'username': 'admin', 'display_name': '管理员', 'password': 'draft-test-12345'})
-        self.post('/api/login', {'username': 'admin', 'password': 'draft-test-12345'})
         self.lift = self.post('/api/elevators', {'building_name': '18栋', 'unit_name': '1单元', 'name': '1号梯',
                               'equipment_number': '00018', 'maintenance_company': '物业维保单位', 'maintenance_phone': '00123'})['id']
 
@@ -261,7 +259,8 @@ class ExportDraftTest(unittest.TestCase):
                            {'id': f'p-{lift}', 'type': 'paragraph', 'text': f'电梯：{label}\n工作事项：{title}'},
                            {'id': f'i-{lift}', 'type': 'image', 'attachment_id': photo, 'caption': '现场'}])
 
-        user = self.client.get('/api/me').json()['id']
+        from backend.main import actor
+        user = actor()['id']
         for scope, old_source, old_blocks in (('all', source, blocks), ('elevator', source[1:], blocks[3:])):
             with self.subTest(scope=scope):
                 scope_label = '全部电梯（2部电梯）' if scope == 'all' else '18栋 1单元 01号电梯'
@@ -322,7 +321,7 @@ class ExportDraftTest(unittest.TestCase):
         self.assertEqual(self.client.post(endpoint + '/prepare', json={'revision': 1}).status_code, 409)
         self.assertEqual(len([e for e in self.client.get('/api/audit').json() if e['target'] == '工作文稿' and e['action'] == '修改']), 1)
 
-    def test_owner_admin_permissions_and_no_legacy_download_bypass(self):
+    def test_existing_authors_drafts_are_shared_and_downloads_stay_revision_bound(self):
         from backend.main import app
         from fastapi.testclient import TestClient
         event = self.event(); photo, _ = self.photo(event, 'red'); draft = self.draft()
@@ -331,20 +330,17 @@ class ExportDraftTest(unittest.TestCase):
             stored = output['download'].rsplit('/', 1)[1]
             self.assertEqual(self.client.get('/api/exports/' + stored).status_code, 400)
         self.assertEqual(self.client.get(first['download']).status_code, 404)
-        self.post('/api/users', {'username': 'staff', 'display_name': '工作人员', 'password': 'draft-staff-12345', 'role': 'staff'})
+        from backend.db import connect, now
+        with connect() as db:
+            old_user = db.execute("""INSERT INTO users(username,display_name,password_hash,role,created_at)
+                                     VALUES('legacy','原创建人','','staff',?)""", (now(),)).lastrowid
+            db.execute('UPDATE export_drafts SET created_by=? WHERE id=?', (old_user, draft['id']))
         with TestClient(app) as other:
-            self.assertEqual(other.get(second['download']).status_code, 401)
-            self.post('/api/login', {'username': 'staff', 'password': 'draft-staff-12345'}, other)
-            self.assertEqual(other.get('/api/export-drafts').json(), [])
             endpoint = f"/api/export-drafts/{draft['id']}"
-            for response in [other.get(endpoint), other.put(endpoint, json=draft),
-                             other.post(endpoint + '/prepare', json={'revision': 1}), other.get(second['download']),
-                             other.get(f'{endpoint}/images/{photo}')]:
-                self.assertEqual(response.status_code, 403)
-            own = self.post('/api/export-drafts', {'scope': 'all'}, other)
-            self.assertEqual(len(other.get('/api/export-drafts').json()), 1)
-        self.assertEqual(len(self.client.get('/api/export-drafts').json()), 2)
-        self.save(own, title='管理员可代编辑')
+            self.assertEqual(other.get('/api/export-drafts').json()[0]['created_by_name'], '原创建人')
+            self.assertEqual(other.get(endpoint).json()['id'], draft['id'])
+            self.assertEqual(other.get(f'{endpoint}/images/{photo}').status_code, 200)
+            self.assertEqual(other.get(second['download']).status_code, 200)
         draft = self.save(draft, title='正文更新后原下载失效')
         self.assertEqual(self.client.get(second['download']).status_code, 404)
 
@@ -406,8 +402,7 @@ class ExportDraftTest(unittest.TestCase):
         code = '''from backend.main import app
 from fastapi.testclient import TestClient
 with TestClient(app) as c:
- assert c.get('/api/export-drafts').status_code == 401
- assert c.post('/api/login',json={'username':'admin','password':'draft-test-12345'}).status_code == 200
+ assert not c.cookies
  draft=c.get('/api/export-drafts').json()[0]
  assert draft['title']=='恢复后文稿' and draft['revision']==2
  detail=c.get('/api/export-drafts/'+str(draft['id'])).json()

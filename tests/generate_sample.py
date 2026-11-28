@@ -13,15 +13,11 @@ output.mkdir(parents=True, exist_ok=True)
 for fmt, filename in [('PNG', '现场.png'), ('WEBP', '现场.webp')]:
     Image.new('RGB', (800, 500), 'steelblue').save(output / filename, format=fmt)
 Document().save(output / '报价.docx')
-from backend.archive_excel import workbook_bytes
-(output / '档案.xlsx').write_bytes(workbook_bytes([{'building_name':'批量导入测试栋','unit_name':'1单元','name':'1号梯','equipment_number':'000123','maintenance_phone':'00123456'}]))
 with isolated_app() as (client, paths):
     def post(path, data):
         response = client.post(path, json=data)
         assert response.status_code == 200, response.text
         return response.json()
-    credentials = {'username':'qa','display_name':'验收管理员','password':'qa-sample-password'}
-    post('/api/setup', credentials); post('/api/login', credentials)
     building = post('/api/buildings', {'name':'18栋'})['id']
     unit = post('/api/units', {'building_id':building,'name':'1单元'})['id']
     elevator = post('/api/elevators', {'unit_id':unit,'name':'1号梯','brand':'演示品牌','model':'示例型号','equipment_number':'QA-001'})['id']

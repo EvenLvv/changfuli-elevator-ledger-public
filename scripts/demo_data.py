@@ -1,23 +1,21 @@
 import argparse
 import json
 import sys
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from backend.db import connect, init_db, now
-from backend.main import add_building, add_elevator, add_event, add_unit
+from backend.db import SHANGHAI, audit, connect, init_db, now
+from backend.main import actor, add_building, add_elevator, add_event, add_unit
 
 
 def install_demo():
+    today = datetime.now(SHANGHAI).date()
     init_db()
     with connect() as db:
         if db.execute("SELECT 1 FROM system_settings WHERE key='demo_ids'").fetchone():
             raise SystemExit("演示数据已经存在。")
-        admin = db.execute("SELECT id FROM users WHERE role='admin' AND active=1 ORDER BY id LIMIT 1").fetchone()
-    if not admin:
-        raise SystemExit("请先在浏览器中设置管理员，再生成演示数据。")
-    user = {"id": admin[0], "role": "admin"}
+    user = actor()
     with connect() as db:
         names = {row[0] for row in db.execute("SELECT name FROM buildings")}
     name = "演示18栋"
@@ -31,17 +29,17 @@ def install_demo():
     for number in (1, 2):
         elevator_ids.append(add_elevator({"unit_id": unit, "name": f"{number}号梯", "equipment_number": f"DEMO-18-1-{number}",
           "brand": "演示品牌", "maintenance_company": "演示维保单位",
-          "inspection_on": (date.today() + timedelta(days=20)).isoformat(),
-          "maintenance_due_on": (date.today() + timedelta(days=6)).isoformat()}, user)["id"])
+          "inspection_on": (today + timedelta(days=20)).isoformat(),
+          "maintenance_due_on": (today + timedelta(days=6)).isoformat()}, user)["id"])
     events = []
     for typ, title, offset in (("日常维保", "半月维保检查", -15), ("故障", "3层厅门无法关闭", -12),
                                ("维修", "检查门锁线路并恢复运行", -11)):
         events.append(add_event({"elevator_id": elevator_ids[0], "type": typ, "title": title,
-             "occurred_on": (date.today() + timedelta(days=offset)).isoformat(),
+             "occurred_on": (today + timedelta(days=offset)).isoformat(),
              "work_content": "演示数据：检查现场并填写工作记录。", "resolution": "已完成处理。",
              "cost_yuan": "100" if typ == "维修" else "0", "notes": "[演示数据]"}, user)["id"])
     for offset, warranty in ((-400, 365), (-3, 10)):
-        when = (date.today() + timedelta(days=offset)).isoformat()
+        when = (today + timedelta(days=offset)).isoformat()
         events.append(add_event({"elevator_id": elevator_ids[0], "type": "配件更换", "title": "更换门锁开关",
           "occurred_on": when, "work_content": "演示数据：更换门锁开关。", "notes": "[演示数据]",
           "parts": [{"name": "门锁开关", "quantity": 1, "unit_price_yuan": "260", "replaced_on": when,
@@ -53,7 +51,9 @@ def install_demo():
 
 
 def remove_demo():
+    user = actor()
     with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
         row = db.execute("SELECT value FROM system_settings WHERE key='demo_ids'").fetchone()
         if not row:
             raise SystemExit("没有需要删除的演示数据。")
@@ -74,10 +74,13 @@ def remove_demo():
             if changed or edited or files:
                 raise SystemExit("演示记录已有修改或附件，已停止删除。请先人工核对。")
         stamp = now()
-        for table, record_ids in (("events", ids['events']), ("elevators", ids['elevators']),
-                                  ("units", [ids['unit']]), ("buildings", [ids['building']])):
+        for table, label, record_ids in (("events", "工作记录", ids['events']), ("elevators", "电梯", ids['elevators']),
+                                         ("units", "单元", [ids['unit']]), ("buildings", "楼栋", [ids['building']])):
             for record_id in record_ids:
-                db.execute(f"UPDATE {table} SET deleted_at=? WHERE id=?", (stamp, record_id))
+                before = db.execute(f"SELECT * FROM {table} WHERE id=? AND deleted_at IS NULL", (record_id,)).fetchone()
+                if before:
+                    db.execute(f"UPDATE {table} SET deleted_at=? WHERE id=?", (stamp, record_id))
+                    audit(db, user['id'], '删除', label, record_id, before=dict(before))
         db.execute("DELETE FROM system_settings WHERE key='demo_ids'")
     print("演示数据已从日常页面移除。历史数据库内容仍保留。")
 

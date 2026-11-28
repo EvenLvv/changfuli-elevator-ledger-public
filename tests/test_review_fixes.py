@@ -17,10 +17,8 @@ class ReviewFixesTest(unittest.TestCase):
         self.context = isolated_app()
         self.client, self.paths = self.context.__enter__()
         self.addCleanup(self.context.__exit__, None, None, None)
-        self.post('/api/setup', {'username': 'test-admin-a', 'display_name': '测试管理员甲',
-                                 'password': 'synthetic-password-123'})
-        self.post('/api/login', {'username': 'test-admin-a', 'password': 'synthetic-password-123'})
-        self.actor = self.client.get('/api/me').json()
+        from backend.main import actor
+        self.actor = actor()
 
     def post(self, path, data):
         response = self.client.post(path, json=data)
@@ -36,7 +34,7 @@ class ReviewFixesTest(unittest.TestCase):
                                          'occurred_on': '2026-01-01', **extra})['id']
 
     def race(self, *operations):
-        """Start real SQLite writers together, retaining already-authenticated actors.
+        """Start real SQLite writers together.
 
         Trace the transactions as well as the outcome, so a lucky serial schedule
         cannot hide a regression that reads business data before acquiring a lock.
@@ -67,29 +65,6 @@ class ReviewFixesTest(unittest.TestCase):
         for statements in traces:
             self.assertEqual(statements[0].upper(), 'BEGIN IMMEDIATE', statements)
         return results
-
-    def check_mutual_admin_changes(self, change):
-        from backend import db, main
-        other_id = self.post('/api/users', {'username': 'test-admin-b', 'display_name': '测试管理员乙',
-                                           'password': 'synthetic-password-456', 'role': 'admin'})['id']
-        other = {'id': other_id, 'role': 'admin'}
-        results = self.race(lambda: main.edit_user(other_id, change, self.actor),
-                            lambda: main.edit_user(self.actor['id'], change, other))
-        self.assertEqual(sorted(status for status, _ in results), [200, 403], results)
-        with db.connect() as connection:
-            admins = connection.execute("SELECT id FROM users WHERE role='admin' AND active=1").fetchall()
-            self.assertEqual(len(admins), 1)
-            loser = other if admins[0]['id'] == self.actor['id'] else self.actor
-        # A request authenticated before revocation must also fail in sequence.
-        with self.assertRaises(HTTPException) as raised:
-            main.edit_user(admins[0]['id'], change, loser)
-        self.assertEqual(raised.exception.status_code, 403)
-
-    def test_admins_cannot_disable_each_other_concurrently(self):
-        self.check_mutual_admin_changes({'active': False})
-
-    def test_admins_cannot_demote_each_other_concurrently(self):
-        self.check_mutual_admin_changes({'role': 'staff'})
 
     def test_building_delete_races_unit_creation(self):
         from backend import main
